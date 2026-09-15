@@ -1,0 +1,30 @@
+# Build artifacts
+bin/
+build/
+
+# Test / coverage
+coverage.out
+*.test
+
+# Go workspace
+go.work
+go.work.sum
+
+# Environment / local config
+.env
+.env.*
+*.local.yaml
+*.local.yml
+*.local.toml
+
+# IDE
+.idea/
+.vscode/
+.cursor/
+
+# macOS
+.DS_Store
+
+# Temporary files
+*.tmp
+*.log
