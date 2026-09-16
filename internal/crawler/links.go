@@ -57,22 +57,40 @@ func (c *Crawler) reduceUntargeted(links []string) ([]string, error) {
 	return targetedLinks, nil
 }
 
-// FIXME: Use one slice accumulator and iterative search
-func extractLinks(n *html.Node) []string {
-	if n.Type == html.ElementNode && n.Data == "a" {
-		for _, attr := range n.Attr {
-			if attr.Key == "href" {
-				return []string{attr.Val}
-			}
+func extractLinks(root *html.Node) []string {
+	links := make([]string, 0)
+	stack := []*html.Node{root}
+
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		node := stack[last]
+		stack = stack[:last]
+
+		if href, ok := linkHref(node); ok {
+			links = append(links, href)
+			continue
+		}
+
+		for child := node.LastChild; child != nil; child = child.PrevSibling {
+			stack = append(stack, child)
 		}
 	}
 
-	links := make([]string, 0)
-	for child := n.FirstChild; child != nil; child = child.NextSibling {
-		links = append(links, extractLinks(child)...)
+	return links
+}
+
+func linkHref(node *html.Node) (string, bool) {
+	if node.Type != html.ElementNode || node.Data != "a" {
+		return "", false
 	}
 
-	return links
+	for _, attr := range node.Attr {
+		if attr.Key == "href" {
+			return attr.Val, true
+		}
+	}
+
+	return "", false
 }
 
 func convertToAbs(baseUrlString string, links []string) ([]string, error) {
