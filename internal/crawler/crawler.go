@@ -15,7 +15,12 @@ import (
 
 const maxRedirects = 10
 
-var errAlreadyProcessed = errors.New("redirect target already processed")
+var (
+	errAlreadyProcessed = errors.New("redirect target already processed")
+
+	// ErrResponseTooLarge reports that a response body exceeds MaxResponseBytes.
+	ErrResponseTooLarge = errors.New("response body exceeds configured size limit")
+)
 
 type Settings struct {
 	// Zero is interpreted as single connection
@@ -23,6 +28,10 @@ type Settings struct {
 
 	// Zero is interpreted as no limit
 	MaxLinksPerPage int
+
+	// MaxResponseBytes is the largest response body accepted from one request.
+	// Zero is interpreted as no limit.
+	MaxResponseBytes int64
 
 	// Zero is interpreted literally
 	MaxDepth int
@@ -47,6 +56,10 @@ func (s Settings) validate() error {
 
 	if s.MaxLinksPerPage < 0 {
 		return errors.New("MaxLinksPerPage is less than 0")
+	}
+
+	if s.MaxResponseBytes < 0 {
+		return errors.New("MaxResponseBytes is less than 0")
 	}
 
 	return nil
@@ -285,7 +298,7 @@ func (c *Crawler) fetch(ctx context.Context, targetURL string, processed map[str
 		return fetchedPage{}, &HTTPError{StatusCode: resp.StatusCode}
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readResponseBody(resp.Body, c.settings.MaxResponseBytes)
 	if err != nil {
 		return fetchedPage{}, &HTTPError{
 			StatusCode: resp.StatusCode,
@@ -300,6 +313,32 @@ func (c *Crawler) fetch(ctx context.Context, targetURL string, processed map[str
 		body: string(body),
 		url:  cleanUpUrl(*finalURL),
 	}, nil
+}
+
+func readResponseBody(body io.Reader, maxBytes int64) ([]byte, error) {
+	if maxBytes == 0 {
+		return io.ReadAll(body)
+	}
+
+	limitedBody := &io.LimitedReader{R: body, N: maxBytes}
+	contents, err := io.ReadAll(limitedBody)
+	if err != nil {
+		return nil, err
+	}
+	if limitedBody.N > 0 {
+		return contents, nil
+	}
+
+	var extraByte [1]byte
+	n, err := body.Read(extraByte[:])
+	if n > 0 {
+		return nil, fmt.Errorf("%w: limit is %d bytes", ErrResponseTooLarge, maxBytes)
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+
+	return contents, nil
 }
 
 func (c *Crawler) reduceUntargeted(links []string) ([]string, error) {
