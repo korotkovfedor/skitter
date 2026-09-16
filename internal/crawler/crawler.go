@@ -12,6 +12,10 @@ import (
 	"golang.org/x/net/html"
 )
 
+const maxRedirects = 10
+
+var errAlreadyProcessed = errors.New("redirect target already processed")
+
 type Settings struct {
 	// Zero is interpreted as single connection
 	MaxConnections int
@@ -22,7 +26,8 @@ type Settings struct {
 	// Zero is interpreted literally
 	MaxDepth int
 
-	// Can be empty, set to filter [TargetHost] host
+	// TargetHost must match URL.Host, including an optional port.
+	// An empty value allows any host.
 	TargetHost string
 }
 
@@ -63,8 +68,33 @@ func New(client *http.Client, settings Settings) (*Crawler, error) {
 		settings.MaxConnections = 1
 	}
 
+	// Keep the caller's client unchanged, including http.DefaultClient.
+	crawlerClient := *client
+	previousCheckRedirect := client.CheckRedirect
+	crawlerClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= maxRedirects {
+			return fmt.Errorf("stopped after %d redirects", maxRedirects)
+		}
+
+		if previousCheckRedirect != nil {
+			if err := previousCheckRedirect(req, via); err != nil {
+				return err
+			}
+		}
+
+		// Check after the caller's hook, which may modify the next request.
+		if req.URL == nil || !isHttp(req.URL) {
+			return errors.New("redirect URL must use HTTP or HTTPS and have a host")
+		}
+		if settings.TargetHost != "" && req.URL.Host != settings.TargetHost {
+			return fmt.Errorf("redirect host %q does not match target host %q", req.URL.Host, settings.TargetHost)
+		}
+
+		return nil
+	}
+
 	return &Crawler{
-		client:   client,
+		client:   &crawlerClient,
 		settings: settings,
 	}, nil
 }
@@ -94,11 +124,19 @@ type linkEntry struct {
 	depth int
 }
 
+type fetchedPage struct {
+	body string
+	url  url.URL
+}
+
 func (c *Crawler) crawl(startUrl *url.URL) error {
 	cleanUrl := cleanUpUrl(*startUrl)
 
 	links := []linkEntry{{url: cleanUrl.String(), depth: 0}}
 	seen := map[string]struct{}{cleanUrl.String(): {}}
+	// Unlike seen, processed contains only URLs whose page was fetched.
+	// It includes both the requested address and the final redirect address.
+	processed := map[string]struct{}{}
 
 	for {
 		if len(links) == 0 {
@@ -109,12 +147,28 @@ func (c *Crawler) crawl(startUrl *url.URL) error {
 		clear(links[:1])
 		links = links[1:]
 
-		data, err := c.fetch(link.url)
+		if _, ok := processed[link.url]; ok {
+			continue
+		}
+
+		page, err := c.fetch(link.url, processed)
 		if err != nil {
+			if errors.Is(err, errAlreadyProcessed) {
+				continue
+			}
 			if link.depth == 0 {
 				return fmt.Errorf("start page fetch: %w", err)
 			}
 			log.Printf("skip url <%s> with error: %v", link.url, err)
+			continue
+		}
+
+		finalURL := page.url.String()
+		_, alreadyProcessed := processed[finalURL]
+		seen[finalURL] = struct{}{}
+		processed[link.url] = struct{}{}
+		processed[finalURL] = struct{}{}
+		if alreadyProcessed {
 			continue
 		}
 
@@ -124,13 +178,13 @@ func (c *Crawler) crawl(startUrl *url.URL) error {
 			continue
 		}
 
-		body, err := html.Parse(strings.NewReader(data))
+		body, err := html.Parse(strings.NewReader(page.body))
 		if err != nil {
 			return err
 		}
 
 		extractedLinks := extractLinks(body)
-		extractedLinks, err = convertToAbs(link.url, extractedLinks)
+		extractedLinks, err = convertToAbs(finalURL, extractedLinks)
 		if err != nil {
 			return err
 		}
@@ -158,30 +212,51 @@ func (c *Crawler) crawl(startUrl *url.URL) error {
 	}
 }
 
-func (c *Crawler) fetch(url string) (string, error) {
-	fmt.Println(url)
-	req, err := http.NewRequest("GET", url, nil)
+func (c *Crawler) fetch(targetURL string, processed map[string]struct{}) (fetchedPage, error) {
+	fmt.Println(targetURL)
+	req, err := http.NewRequest("GET", targetURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
+		return fetchedPage{}, fmt.Errorf("create request: %w", err)
+	}
+
+	client := *c.client
+	checkRedirect := client.CheckRedirect
+	finalURL := req.URL
+	client.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+		if err := checkRedirect(next, via); err != nil {
+			return err
+		}
+		cleanURL := cleanUpUrl(*next.URL)
+		if _, ok := processed[cleanURL.String()]; ok {
+			return errAlreadyProcessed
+		}
+		finalURL = next.URL
+		return nil
 	}
 
 	req.Header.Set("User-Agent", "SkitterBot/0.1 korotkoffst@gmail.com")
-	resp, err := c.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("fetch request: %w", err)
+		return fetchedPage{}, fmt.Errorf("fetch request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("status code <%d>", resp.StatusCode)
+		return fetchedPage{}, fmt.Errorf("status code <%d>", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("read body: %w", err)
+		return fetchedPage{}, fmt.Errorf("read body: %w", err)
 	}
 
-	return string(body), nil
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalURL = resp.Request.URL
+	}
+	return fetchedPage{
+		body: string(body),
+		url:  cleanUpUrl(*finalURL),
+	}, nil
 }
 
 func (c *Crawler) reduceUntargeted(links []string) ([]string, error) {
