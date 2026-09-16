@@ -1,6 +1,7 @@
 package crawler
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -99,7 +100,7 @@ func New(client *http.Client, settings Settings) (*Crawler, error) {
 	}, nil
 }
 
-func (c *Crawler) Run(startUrl *url.URL) error {
+func (c *Crawler) Run(ctx context.Context, startUrl *url.URL) error {
 	if startUrl == nil {
 		return errors.New("startUrl is nil")
 	}
@@ -112,7 +113,7 @@ func (c *Crawler) Run(startUrl *url.URL) error {
 		return errors.New("targetHost does not match startUrl")
 	}
 
-	if err := c.crawl(startUrl); err != nil {
+	if err := c.crawl(ctx, startUrl); err != nil {
 		return err
 	}
 
@@ -129,7 +130,7 @@ type fetchedPage struct {
 	url  url.URL
 }
 
-func (c *Crawler) crawl(startUrl *url.URL) error {
+func (c *Crawler) crawl(ctx context.Context, startUrl *url.URL) error {
 	cleanUrl := cleanUpUrl(*startUrl)
 
 	links := []linkEntry{{url: cleanUrl.String(), depth: 0}}
@@ -139,6 +140,10 @@ func (c *Crawler) crawl(startUrl *url.URL) error {
 	processed := map[string]struct{}{}
 
 	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
 		if len(links) == 0 {
 			return nil
 		}
@@ -151,7 +156,7 @@ func (c *Crawler) crawl(startUrl *url.URL) error {
 			continue
 		}
 
-		page, err := c.fetch(link.url, processed)
+		page, err := c.fetch(ctx, link.url, processed)
 		if err != nil {
 			if errors.Is(err, errAlreadyProcessed) {
 				continue
@@ -212,9 +217,9 @@ func (c *Crawler) crawl(startUrl *url.URL) error {
 	}
 }
 
-func (c *Crawler) fetch(targetURL string, processed map[string]struct{}) (fetchedPage, error) {
+func (c *Crawler) fetch(ctx context.Context, targetURL string, processed map[string]struct{}) (fetchedPage, error) {
 	fmt.Println(targetURL)
-	req, err := http.NewRequest("GET", targetURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
 	if err != nil {
 		return fetchedPage{}, fmt.Errorf("create request: %w", err)
 	}

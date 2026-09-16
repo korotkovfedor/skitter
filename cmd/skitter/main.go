@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/korotkovfedor/skitter/internal/crawler"
 )
@@ -25,7 +27,10 @@ func main() {
 		panic(err)
 	}
 
-	err = c.Run(targetUrl)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	defer cancel()
+
+	err = c.Run(ctx, targetUrl)
 	if err != nil {
 		panic(err)
 	}
