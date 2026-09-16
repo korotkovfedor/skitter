@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"time"
@@ -30,7 +31,10 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
 
-	err = c.Run(ctx, targetUrl)
+	err = c.Run(ctx, targetUrl, func(page crawler.PageResult) error {
+		fmt.Println(page.FinalURL)
+		return nil
+	})
 	if err != nil {
 		panic(err)
 	}

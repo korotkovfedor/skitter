@@ -100,7 +100,7 @@ func New(client *http.Client, settings Settings) (*Crawler, error) {
 	}, nil
 }
 
-func (c *Crawler) Run(ctx context.Context, startUrl *url.URL) error {
+func (c *Crawler) Run(ctx context.Context, startUrl *url.URL, onResult func(page PageResult) error) error {
 	if startUrl == nil {
 		return errors.New("startUrl is nil")
 	}
@@ -113,7 +113,11 @@ func (c *Crawler) Run(ctx context.Context, startUrl *url.URL) error {
 		return errors.New("targetHost does not match startUrl")
 	}
 
-	if err := c.crawl(ctx, startUrl); err != nil {
+	if onResult == nil {
+		return errors.New("onResult is nil")
+	}
+
+	if err := c.crawl(ctx, startUrl, onResult); err != nil {
 		return err
 	}
 
@@ -130,7 +134,7 @@ type fetchedPage struct {
 	url  url.URL
 }
 
-func (c *Crawler) crawl(ctx context.Context, startUrl *url.URL) error {
+func (c *Crawler) crawl(ctx context.Context, startUrl *url.URL, onResult func(page PageResult) error) error {
 	cleanUrl := cleanUpUrl(*startUrl)
 
 	links := []linkEntry{{url: cleanUrl.String(), depth: 0}}
@@ -161,6 +165,20 @@ func (c *Crawler) crawl(ctx context.Context, startUrl *url.URL) error {
 			if errors.Is(err, errAlreadyProcessed) {
 				continue
 			}
+
+			result := PageResult{
+				OriginalURL: link.url,
+				Depth:       link.depth,
+				Err:         err,
+			}
+			if httpErr, ok := errors.AsType[*HTTPError](err); ok {
+				result.StatusCode = httpErr.StatusCode
+			}
+			clientErr := onResult(result)
+
+			if clientErr != nil {
+				return clientErr
+			}
 			if link.depth == 0 {
 				return fmt.Errorf("start page fetch: %w", err)
 			}
@@ -177,7 +195,17 @@ func (c *Crawler) crawl(ctx context.Context, startUrl *url.URL) error {
 			continue
 		}
 
-		// DO WORK FOR RETURN
+		clientErr := onResult(PageResult{
+			OriginalURL: link.url,
+			FinalURL:    finalURL,
+			Depth:       link.depth,
+			StatusCode:  200,
+			HTML:        page.body,
+			Err:         nil,
+		})
+		if clientErr != nil {
+			return clientErr
+		}
 
 		if link.depth >= c.settings.MaxDepth {
 			continue
@@ -218,7 +246,6 @@ func (c *Crawler) crawl(ctx context.Context, startUrl *url.URL) error {
 }
 
 func (c *Crawler) fetch(ctx context.Context, targetURL string, processed map[string]struct{}) (fetchedPage, error) {
-	fmt.Println(targetURL)
 	req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
 	if err != nil {
 		return fetchedPage{}, fmt.Errorf("create request: %w", err)
@@ -242,17 +269,28 @@ func (c *Crawler) fetch(ctx context.Context, targetURL string, processed map[str
 	req.Header.Set("User-Agent", "SkitterBot/0.1 korotkoffst@gmail.com")
 	resp, err := client.Do(req)
 	if err != nil {
+		// A rejected redirect can return both an error and a response.
+		// Client.Do has already closed that response's body.
+		if resp != nil {
+			return fetchedPage{}, &HTTPError{
+				StatusCode: resp.StatusCode,
+				Err:        fmt.Errorf("fetch request: %w", err),
+			}
+		}
 		return fetchedPage{}, fmt.Errorf("fetch request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return fetchedPage{}, fmt.Errorf("status code <%d>", resp.StatusCode)
+		return fetchedPage{}, &HTTPError{StatusCode: resp.StatusCode}
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fetchedPage{}, fmt.Errorf("read body: %w", err)
+		return fetchedPage{}, &HTTPError{
+			StatusCode: resp.StatusCode,
+			Err:        fmt.Errorf("read body: %w", err),
+		}
 	}
 
 	if resp.Request != nil && resp.Request.URL != nil {
