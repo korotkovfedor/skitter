@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"time"
 )
 
 type Settings struct {
@@ -26,6 +27,14 @@ type Settings struct {
 	// TargetHost must match URL.Host, including an optional port.
 	// An empty value allows any host.
 	TargetHost string
+
+	// MaxRetries is the number of additional attempts after the first request.
+	// Zero performs one request without retries.
+	MaxRetries int
+
+	// RetryLatency is the delay between retry attempts.
+	// Zero retries immediately.
+	RetryLatency time.Duration
 }
 
 func (s Settings) MustLimitLinks() bool {
@@ -47,6 +56,14 @@ func (s Settings) validate() error {
 
 	if s.MaxResponseBytes < 0 {
 		return errors.New("MaxResponseBytes is less than 0")
+	}
+
+	if s.MaxRetries < 0 {
+		return errors.New("MaxRetries is less than 0")
+	}
+
+	if s.RetryLatency < 0 {
+		return errors.New("RetryLatency is less than 0")
 	}
 
 	return nil

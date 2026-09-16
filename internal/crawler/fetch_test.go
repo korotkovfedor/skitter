@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestRunReportsResponseSizeLimit(t *testing.T) {
@@ -79,6 +81,70 @@ func TestRunAcceptsAll2xxResponses(t *testing.T) {
 	}
 }
 
+func TestRunRetriesTemporaryResponse(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) == 1 {
+			http.Error(w, "temporary", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = io.WriteString(w, "recovered")
+	}))
+	defer server.Close()
+
+	crawler, startURL := newTestCrawler(t, server, Settings{
+		MaxDepth:     0,
+		MaxRetries:   1,
+		RetryLatency: 0,
+	})
+	var results []PageResult
+	err := crawler.Run(context.Background(), startURL, func(page PageResult) error {
+		results = append(results, page)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("request attempts = %d, want 2", attempts.Load())
+	}
+	if len(results) != 1 || results[0].StatusCode != http.StatusOK || results[0].HTML != "recovered" {
+		t.Fatalf("callback results = %+v, want recovered 200 response", results)
+	}
+}
+
+func TestRunKeepsFinalTemporaryResponse(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		http.Error(w, "temporary", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	crawler, startURL := newTestCrawler(t, server, Settings{
+		MaxDepth:     0,
+		MaxRetries:   2,
+		RetryLatency: 0,
+	})
+	var results []PageResult
+	err := crawler.Run(context.Background(), startURL, func(page PageResult) error {
+		results = append(results, page)
+		return nil
+	})
+	if err == nil {
+		t.Fatal("Run() error = nil, want final 503 error")
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("request attempts = %d, want 3", attempts.Load())
+	}
+	if len(results) != 1 || results[0].StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("callback results = %+v, want final 503 response", results)
+	}
+	if _, ok := errors.AsType[*HTTPError](results[0].Err); !ok {
+		t.Fatalf("PageResult.Err = %T, want *HTTPError", results[0].Err)
+	}
+}
+
 func TestReadResponseBodyLimit(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -130,5 +196,18 @@ func TestNewRejectsNegativeMaxResponseBytes(t *testing.T) {
 	_, err := New(http.DefaultClient, Settings{MaxResponseBytes: -1})
 	if err == nil {
 		t.Fatal("New() error = nil, want validation error")
+	}
+}
+
+func TestNewRejectsInvalidRetrySettings(t *testing.T) {
+	tests := []Settings{
+		{MaxRetries: -1},
+		{RetryLatency: -time.Nanosecond},
+	}
+
+	for _, settings := range tests {
+		if _, err := New(http.DefaultClient, settings); err == nil {
+			t.Fatalf("New(%+v) error = nil, want validation error", settings)
+		}
 	}
 }

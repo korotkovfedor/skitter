@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"time"
 )
 
 var (
@@ -44,7 +45,7 @@ func (c *Crawler) fetch(ctx context.Context, targetURL string, processed map[str
 	}
 
 	req.Header.Set("User-Agent", "SkitterBot/0.1 korotkoffst@gmail.com")
-	resp, err := client.Do(req)
+	resp, err := doWithRetry(ctx, &client, req, c.settings.MaxRetries, c.settings.RetryLatency)
 	if err != nil {
 		// A rejected redirect can return both an error and a response.
 		// Client.Do has already closed that response's body.
@@ -78,6 +79,66 @@ func (c *Crawler) fetch(ctx context.Context, targetURL string, processed map[str
 		url:        cleanUpUrl(*finalURL),
 		statusCode: resp.StatusCode,
 	}, nil
+}
+
+func doWithRetry(
+	ctx context.Context,
+	client *http.Client,
+	req *http.Request,
+	retries int,
+	retryLatency time.Duration,
+) (*http.Response, error) {
+	for attempt := 0; attempt <= retries; attempt++ {
+		resp, err := client.Do(req)
+
+		if err != nil {
+			// Per net/http's contract, a response with an error is returned only
+			// when CheckRedirect rejects the next request.
+			// Preserve its status and do not retry a policy decision.
+			if resp != nil {
+				return resp, err
+			}
+			if attempt == retries {
+				return nil, fmt.Errorf("request failed after %d attempts: %w", retries+1, err)
+			}
+			if err := waitForRetry(ctx, retryLatency); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		if !shouldRetry(resp.StatusCode) || attempt == retries {
+			return resp, nil
+		}
+
+		resp.Body.Close()
+		if err := waitForRetry(ctx, retryLatency); err != nil {
+			return nil, err
+		}
+	}
+
+	return nil, errors.New("unreachable retry state")
+}
+
+func waitForRetry(ctx context.Context, retryLatency time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(retryLatency):
+		return nil
+	}
+}
+
+func shouldRetry(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
 }
 
 func readResponseBody(body io.Reader, maxBytes int64) ([]byte, error) {
