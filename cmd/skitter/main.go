@@ -25,7 +25,7 @@ func main() {
 		panic(err)
 	}
 
-	err = c.Run(*targetUrl)
+	err = c.Run(targetUrl)
 	if err != nil {
 		panic(err)
 	}

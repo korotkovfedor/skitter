@@ -5,10 +5,8 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"maps"
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
 
 	"golang.org/x/net/html"
@@ -28,7 +26,11 @@ type Settings struct {
 	TargetHost string
 }
 
-func (s *Settings) validate() error {
+func (s Settings) MustLimitLinks() bool {
+	return s.MaxLinksPerPage > 0
+}
+
+func (s Settings) validate() error {
 	if s.MaxDepth < 0 {
 		return errors.New("MaxDepth is less than 0")
 	}
@@ -50,6 +52,9 @@ type Crawler struct {
 }
 
 func New(client *http.Client, settings Settings) (*Crawler, error) {
+	if client == nil {
+		return nil, errors.New("client is nil")
+	}
 	if err := settings.validate(); err != nil {
 		return nil, err
 	}
@@ -64,88 +69,97 @@ func New(client *http.Client, settings Settings) (*Crawler, error) {
 	}, nil
 }
 
-func (c *Crawler) Run(targetUrl url.URL) error {
-	if c.settings.TargetHost != "" && targetUrl.Host != c.settings.TargetHost {
-		return errors.New("targetHost does not match targetUrl")
+func (c *Crawler) Run(startUrl *url.URL) error {
+	if startUrl == nil {
+		return errors.New("startUrl is nil")
 	}
 
-	if err := c.crawl(targetUrl.String(), c.settings.MaxDepth, &map[string]struct{}{}); err != nil {
+	if !isHttp(startUrl) {
+		return errors.New("startUrl does not support HTTP")
+	}
+
+	if c.settings.TargetHost != "" && startUrl.Host != c.settings.TargetHost {
+		return errors.New("targetHost does not match startUrl")
+	}
+
+	if err := c.crawl(startUrl); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (c *Crawler) crawl(targetUrl string, remainingDepth int, visited *map[string]struct{}) error {
-	if remainingDepth < 0 {
-		return errors.New("remainingDepth is below zero")
-	}
+type linkEntry struct {
+	url   string
+	depth int
+}
 
-	_, ok := (*visited)[targetUrl]
-	if ok {
-		return nil
-	}
+func (c *Crawler) crawl(startUrl *url.URL) error {
+	cleanUrl := cleanUpUrl(*startUrl)
 
-	(*visited)[targetUrl] = struct{}{}
-	fmt.Println(targetUrl)
-	data, err := c.fetch(targetUrl)
-	if err != nil {
-		if c.settings.MaxDepth == remainingDepth {
-			return fmt.Errorf("start page fetch: %w", err)
-		}
-		log.Printf("skip url <%s> with error: %v", targetUrl, err)
-		return nil
-	}
+	links := []linkEntry{{url: cleanUrl.String(), depth: 0}}
+	seen := map[string]struct{}{cleanUrl.String(): {}}
 
-	body, err := html.Parse(strings.NewReader(data))
-	if err != nil {
-		return err
-	}
-
-	links := extractLinks(body)
-	links, err = convertToAbs(targetUrl, links)
-	if err != nil {
-		return err
-	}
-
-	if c.settings.TargetHost != "" {
-		links, err = c.reduceUntargeted(links)
-		if err != nil {
-			return err
-		}
-	}
-
-	// TODO: Just use golang-set
-	uniqueLinksSet := map[string]struct{}{}
-	for _, link := range links {
-		_, ok = (*visited)[link]
-		if ok {
-			continue
-		}
-
-		uniqueLinksSet[link] = struct{}{}
-	}
-
-	uniqueLinks := slices.Collect(maps.Keys(uniqueLinksSet))
-	maxLinksPerPage := c.settings.MaxLinksPerPage
-	if maxLinksPerPage > 0 && len(uniqueLinks) > maxLinksPerPage {
-		uniqueLinks = uniqueLinks[:maxLinksPerPage]
-	}
-
-	for _, link := range uniqueLinks {
-		if remainingDepth == 0 {
+	for {
+		if len(links) == 0 {
 			return nil
 		}
 
-		if err = c.crawl(link, remainingDepth-1, visited); err != nil {
+		link := links[0]
+		clear(links[:1])
+		links = links[1:]
+
+		data, err := c.fetch(link.url)
+		if err != nil {
+			if link.depth == 0 {
+				return fmt.Errorf("start page fetch: %w", err)
+			}
+			log.Printf("skip url <%s> with error: %v", link.url, err)
+			continue
+		}
+
+		// DO WORK FOR RETURN
+
+		if link.depth >= c.settings.MaxDepth {
+			continue
+		}
+
+		body, err := html.Parse(strings.NewReader(data))
+		if err != nil {
 			return err
 		}
-	}
 
-	return nil
+		extractedLinks := extractLinks(body)
+		extractedLinks, err = convertToAbs(link.url, extractedLinks)
+		if err != nil {
+			return err
+		}
+
+		if c.settings.TargetHost != "" {
+			extractedLinks, err = c.reduceUntargeted(extractedLinks)
+			if err != nil {
+				return err
+			}
+		}
+
+		extractedLinks = removeDuplicates(extractedLinks)
+		extractedLinks = removeSeen(extractedLinks, seen)
+		if c.settings.MustLimitLinks() {
+			extractedLinks = removeExceeds(extractedLinks, c.settings.MaxLinksPerPage)
+		}
+
+		for _, extractedLink := range extractedLinks {
+			seen[extractedLink] = struct{}{}
+			links = append(links, linkEntry{
+				url:   extractedLink,
+				depth: link.depth + 1,
+			})
+		}
+	}
 }
 
 func (c *Crawler) fetch(url string) (string, error) {
+	fmt.Println(url)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
@@ -194,6 +208,7 @@ func extractLinks(n *html.Node) []string {
 	if n.Type == html.ElementNode && n.Data == "a" {
 		for _, attr := range n.Attr {
 			if attr.Key == "href" {
+
 				return []string{attr.Val}
 			}
 		}
@@ -222,8 +237,68 @@ func convertToAbs(baseUrlString string, links []string) ([]string, error) {
 		}
 
 		absoluteUrl := baseUrl.ResolveReference(l)
-		convertedLinks = append(convertedLinks, absoluteUrl.String())
+
+		if !isHttp(absoluteUrl) {
+			continue
+		}
+
+		cleanedUrl := cleanUpUrl(*absoluteUrl)
+		convertedLinks = append(convertedLinks, cleanedUrl.String())
 	}
 
 	return convertedLinks, nil
+}
+
+func isHttp(url *url.URL) bool {
+	schemeValid := url.Scheme == "https" || url.Scheme == "http"
+	hostValid := url.Hostname() != ""
+
+	return schemeValid && hostValid
+}
+
+func cleanUpUrl(u url.URL) url.URL {
+	u.Fragment = ""
+	u.RawFragment = ""
+
+	return u
+}
+
+func removeDuplicates(array []string) []string {
+	seen := map[string]struct{}{}
+	unique := make([]string, 0)
+
+	for _, el := range array {
+		_, ok := seen[el]
+		if ok {
+			continue
+		}
+
+		seen[el] = struct{}{}
+		unique = append(unique, el)
+	}
+
+	return unique
+}
+
+func removeExceeds(array []string, limit int) []string {
+	if len(array) > limit {
+		return array[:limit]
+	}
+
+	return array
+}
+
+func removeSeen(array []string, seen map[string]struct{}) []string {
+	unseen := make([]string, 0)
+
+	for _, el := range array {
+		_, ok := seen[el]
+		if ok {
+			continue
+		}
+
+		unseen = append(unseen, el)
+	}
+
+	return unseen
 }
