@@ -14,25 +14,31 @@ import (
 	"golang.org/x/net/html"
 )
 
-// Settings TODO: 0 is no limit
 type Settings struct {
-	MaxConnections  int
+	// Zero is interpreted as single connection
+	MaxConnections int
+
+	// Zero is interpreted as no limit
 	MaxLinksPerPage int
-	DeepLevel       int
-	TargetHost      url.URL
+
+	// Zero is interpreted literally
+	MaxDepth int
+
+	// Can be empty, set to filter [TargetHost] host
+	TargetHost string
 }
 
 func (s *Settings) validate() error {
-	if s.DeepLevel < 0 {
-		return errors.New("deepLevel is less than 0")
+	if s.MaxDepth < 0 {
+		return errors.New("MaxDepth is less than 0")
 	}
 
 	if s.MaxConnections < 0 {
-		return errors.New("maxConnections is less than 0")
+		return errors.New("MaxConnections is less than 0")
 	}
 
 	if s.MaxLinksPerPage < 0 {
-		return errors.New("maxConnections is less than 0")
+		return errors.New("MaxLinksPerPage is less than 0")
 	}
 
 	return nil
@@ -48,27 +54,31 @@ func New(client *http.Client, settings Settings) (*Crawler, error) {
 		return nil, err
 	}
 
+	if settings.MaxConnections == 0 {
+		settings.MaxConnections = 1
+	}
+
 	return &Crawler{
 		client:   client,
 		settings: settings,
 	}, nil
 }
 
-func (c *Crawler) Go(targetUrl url.URL) error {
-	if targetUrl.Host != c.settings.TargetHost.Host {
+func (c *Crawler) Run(targetUrl url.URL) error {
+	if c.settings.TargetHost != "" && targetUrl.Host != c.settings.TargetHost {
 		return errors.New("targetHost does not match targetUrl")
 	}
 
-	if err := c.crawl(targetUrl.String(), c.settings.DeepLevel, &map[string]struct{}{}); err != nil {
+	if err := c.crawl(targetUrl.String(), c.settings.MaxDepth, &map[string]struct{}{}); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (c *Crawler) crawl(targetUrl string, currentDeepLevel int, visited *map[string]struct{}) error {
-	if currentDeepLevel < 0 {
-		return errors.New("deep level is below zero")
+func (c *Crawler) crawl(targetUrl string, remainingDepth int, visited *map[string]struct{}) error {
+	if remainingDepth < 0 {
+		return errors.New("remainingDepth is below zero")
 	}
 
 	_, ok := (*visited)[targetUrl]
@@ -80,6 +90,9 @@ func (c *Crawler) crawl(targetUrl string, currentDeepLevel int, visited *map[str
 	fmt.Println(targetUrl)
 	data, err := c.fetch(targetUrl)
 	if err != nil {
+		if c.settings.MaxDepth == remainingDepth {
+			return fmt.Errorf("start page fetch: %w", err)
+		}
 		log.Printf("skip url <%s> with error: %v", targetUrl, err)
 		return nil
 	}
@@ -89,16 +102,17 @@ func (c *Crawler) crawl(targetUrl string, currentDeepLevel int, visited *map[str
 		return err
 	}
 
-	links := c.extractLinks(body)
-
-	links, err = c.convertToAbs(targetUrl, links)
+	links := extractLinks(body)
+	links, err = convertToAbs(targetUrl, links)
 	if err != nil {
 		return err
 	}
 
-	links, err = c.reduceUntargeted(links)
-	if err != nil {
-		return err
+	if c.settings.TargetHost != "" {
+		links, err = c.reduceUntargeted(links)
+		if err != nil {
+			return err
+		}
 	}
 
 	// TODO: Just use golang-set
@@ -113,16 +127,17 @@ func (c *Crawler) crawl(targetUrl string, currentDeepLevel int, visited *map[str
 	}
 
 	uniqueLinks := slices.Collect(maps.Keys(uniqueLinksSet))
-	if len(uniqueLinks) > c.settings.MaxLinksPerPage {
-		uniqueLinks = uniqueLinks[:c.settings.MaxLinksPerPage]
+	maxLinksPerPage := c.settings.MaxLinksPerPage
+	if maxLinksPerPage > 0 && len(uniqueLinks) > maxLinksPerPage {
+		uniqueLinks = uniqueLinks[:maxLinksPerPage]
 	}
 
 	for _, link := range uniqueLinks {
-		if currentDeepLevel == 0 {
+		if remainingDepth == 0 {
 			return nil
 		}
 
-		if err = c.crawl(link, currentDeepLevel-1, visited); err != nil {
+		if err = c.crawl(link, remainingDepth-1, visited); err != nil {
 			return err
 		}
 	}
@@ -155,7 +170,27 @@ func (c *Crawler) fetch(url string) (string, error) {
 	return string(body), nil
 }
 
-func (c *Crawler) extractLinks(n *html.Node) []string {
+func (c *Crawler) reduceUntargeted(links []string) ([]string, error) {
+	if c.settings.TargetHost == "" {
+		return nil, errors.New("target host is empty")
+	}
+
+	targetedLinks := make([]string, 0)
+	for _, link := range links {
+		u, err := url.Parse(link)
+		if err != nil {
+			return nil, fmt.Errorf("parse while reducing untargeted: %w", err)
+		}
+
+		if u.Host == c.settings.TargetHost {
+			targetedLinks = append(targetedLinks, u.String())
+		}
+	}
+
+	return targetedLinks, nil
+}
+
+func extractLinks(n *html.Node) []string {
 	if n.Type == html.ElementNode && n.Data == "a" {
 		for _, attr := range n.Attr {
 			if attr.Key == "href" {
@@ -166,13 +201,13 @@ func (c *Crawler) extractLinks(n *html.Node) []string {
 
 	links := make([]string, 0)
 	for child := n.FirstChild; child != nil; child = child.NextSibling {
-		links = append(links, c.extractLinks(child)...)
+		links = append(links, extractLinks(child)...)
 	}
 
 	return links
 }
 
-func (c *Crawler) convertToAbs(baseUrlString string, links []string) ([]string, error) {
+func convertToAbs(baseUrlString string, links []string) ([]string, error) {
 	baseUrl, err := url.Parse(baseUrlString)
 	if err != nil {
 		return nil, fmt.Errorf("parse url: %w", err)
@@ -191,24 +226,4 @@ func (c *Crawler) convertToAbs(baseUrlString string, links []string) ([]string, 
 	}
 
 	return convertedLinks, nil
-}
-
-func (c *Crawler) reduceUntargeted(links []string) ([]string, error) {
-	if c.settings.TargetHost.Host == "" {
-		return nil, errors.New("target host is empty")
-	}
-
-	targetedLinks := make([]string, 0)
-	for _, link := range links {
-		u, err := url.Parse(link)
-		if err != nil {
-			return nil, fmt.Errorf("parse while reducing untargeted: %w", err)
-		}
-
-		if u.Host == c.settings.TargetHost.Host {
-			targetedLinks = append(targetedLinks, u.String())
-		}
-	}
-
-	return targetedLinks, nil
 }

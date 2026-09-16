@@ -15,9 +15,9 @@ func main() {
 
 	client := http.DefaultClient
 	settings := crawler.Settings{
-		TargetHost:      *targetUrl,
+		TargetHost:      targetUrl.Host,
 		MaxLinksPerPage: 20,
-		DeepLevel:       2,
+		MaxDepth:        2,
 	}
 
 	c, err := crawler.New(client, settings)
@@ -25,7 +25,7 @@ func main() {
 		panic(err)
 	}
 
-	err = c.Go(*targetUrl)
+	err = c.Run(*targetUrl)
 	if err != nil {
 		panic(err)
 	}
