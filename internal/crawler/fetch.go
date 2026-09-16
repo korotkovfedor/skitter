@@ -24,7 +24,7 @@ type fetchedPage struct {
 	statusCode int
 }
 
-func (c *Crawler) fetch(ctx context.Context, targetURL string, processed map[string]struct{}) (fetchedPage, error) {
+func (c *Crawler) fetch(ctx context.Context, targetURL string) (fetchedPage, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
 	if err != nil {
 		return fetchedPage{}, fmt.Errorf("create request: %w", err)
@@ -37,10 +37,7 @@ func (c *Crawler) fetch(ctx context.Context, targetURL string, processed map[str
 		if err := checkRedirect(next, via); err != nil {
 			return err
 		}
-		cleanURL := cleanUpUrl(*next.URL)
-		if _, ok := processed[cleanURL.String()]; ok {
-			return errAlreadyProcessed
-		}
+
 		finalURL = next.URL
 		return nil
 	}

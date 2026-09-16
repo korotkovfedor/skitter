@@ -9,7 +9,7 @@ import (
 	"golang.org/x/net/html"
 )
 
-func (c *Crawler) pageLinks(pageHTML string, baseURL string, seen map[string]struct{}) ([]string, error) {
+func (c *Crawler) pageLinks(pageHTML string, baseURL string) ([]string, error) {
 	body, err := html.Parse(strings.NewReader(pageHTML))
 	if err != nil {
 		return nil, err
@@ -26,12 +26,6 @@ func (c *Crawler) pageLinks(pageHTML string, baseURL string, seen map[string]str
 		if err != nil {
 			return nil, err
 		}
-	}
-
-	extractedLinks = removeDuplicates(extractedLinks)
-	extractedLinks = removeSeen(extractedLinks, seen)
-	if c.settings.MustLimitLinks() {
-		extractedLinks = removeExceeds(extractedLinks, c.settings.MaxLinksPerPage)
 	}
 
 	return extractedLinks, nil

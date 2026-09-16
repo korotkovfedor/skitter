@@ -19,8 +19,9 @@ func main() {
 	client := http.DefaultClient
 	settings := crawler.Settings{
 		TargetHost:      targetUrl.Host,
-		MaxLinksPerPage: 20,
+		MaxLinksPerPage: 10,
 		MaxDepth:        2,
+		MaxConcurrency:  10,
 	}
 
 	c, err := crawler.New(client, settings)
@@ -28,14 +29,15 @@ func main() {
 		panic(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*90)
 	defer cancel()
 
-	err = c.Run(ctx, targetUrl, func(page crawler.PageResult) error {
-		fmt.Println(page.FinalURL)
-		return nil
-	})
+	in, err := c.Run(ctx, targetUrl)
 	if err != nil {
 		panic(err)
+	}
+
+	for page := range in {
+		fmt.Println(page.FinalURL)
 	}
 }

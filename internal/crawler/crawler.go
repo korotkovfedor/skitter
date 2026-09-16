@@ -4,15 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"time"
 )
 
 type Settings struct {
-	// Zero is interpreted as single connection
-	MaxConnections int
+	// Number of max concurrent fetch'n'parse jobs.
+	// Zero is interpreted as single working fetch goroutine.
+	MaxConcurrency int
 
 	// Zero is interpreted as no limit
 	MaxLinksPerPage int
@@ -38,7 +38,7 @@ type Settings struct {
 	RetryLatency time.Duration
 }
 
-func (s Settings) MustLimitLinks() bool {
+func (s Settings) HasLinkLimit() bool {
 	return s.MaxLinksPerPage > 0
 }
 
@@ -47,7 +47,7 @@ func (s Settings) validate() error {
 		return errors.New("MaxDepth is less than 0")
 	}
 
-	if s.MaxConnections < 0 {
+	if s.MaxConcurrency < 0 {
 		return errors.New("MaxConnections is less than 0")
 	}
 
@@ -83,8 +83,8 @@ func New(client *http.Client, settings Settings) (*Crawler, error) {
 		return nil, err
 	}
 
-	if settings.MaxConnections == 0 {
-		settings.MaxConnections = 1
+	if settings.MaxConcurrency == 0 {
+		settings.MaxConcurrency = 1
 	}
 
 	return &Crawler{
@@ -93,28 +93,24 @@ func New(client *http.Client, settings Settings) (*Crawler, error) {
 	}, nil
 }
 
-func (c *Crawler) Run(ctx context.Context, startUrl *url.URL, onResult func(page PageResult) error) error {
+// Run starts crawling from startURL.
+//
+// If the caller stops consuming results before the returned channel is closed,
+// it must cancel ctx.
+func (c *Crawler) Run(ctx context.Context, startUrl *url.URL) (<-chan PageResult, error) {
 	if startUrl == nil {
-		return errors.New("startUrl is nil")
+		return nil, errors.New("startUrl is nil")
 	}
 
 	if !isHttp(startUrl) {
-		return errors.New("startUrl does not support HTTP")
+		return nil, errors.New("startUrl does not support HTTP")
 	}
 
 	if c.settings.TargetHost != "" && startUrl.Host != c.settings.TargetHost {
-		return errors.New("targetHost does not match startUrl")
+		return nil, errors.New("targetHost does not match startUrl")
 	}
 
-	if onResult == nil {
-		return errors.New("onResult is nil")
-	}
-
-	if err := c.crawl(ctx, startUrl, onResult); err != nil {
-		return err
-	}
-
-	return nil
+	return c.crawl(ctx, startUrl), nil
 }
 
 type linkEntry struct {
@@ -122,94 +118,201 @@ type linkEntry struct {
 	depth int
 }
 
-func (c *Crawler) crawl(ctx context.Context, startUrl *url.URL, onResult func(page PageResult) error) error {
-	cleanUrl := cleanUpUrl(*startUrl)
+type workResult struct {
+	link           linkEntry
+	page           *fetchedPage
+	extractedLinks []string
+	err            error
+}
 
-	links := []linkEntry{{url: cleanUrl.String(), depth: 0}}
-	seen := map[string]struct{}{cleanUrl.String(): {}}
-	// Unlike seen, processed contains only URLs whose page was fetched.
-	// It includes both the requested address and the final redirect address.
-	processed := map[string]struct{}{}
+// Bounded goroutines
+// [crawl]: owns q, seen, processed
+// spawns at most MaxConnections goroutines for fetch and extract
+// [spawned]: fetch n parse
+func (c *Crawler) crawl(ctx context.Context, startUrl *url.URL) <-chan PageResult {
+	out := make(chan PageResult)
 
-	for {
-		if ctx.Err() != nil {
-			return ctx.Err()
+	go func() {
+		defer close(out)
+
+		cleanUrl := cleanUpUrl(*startUrl)
+
+		links := []linkEntry{{url: cleanUrl.String(), depth: 0}}
+		seen := map[string]struct{}{cleanUrl.String(): {}}
+		// Unlike seen, processed contains only URLs whose page was fetched.
+		// It includes both the requested address and the final redirect address.
+		processed := map[string]struct{}{}
+
+		inFlight := 0
+		done := make(chan workResult)
+
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+
+			for len(links) > 0 && inFlight < c.settings.MaxConcurrency {
+				link := links[0]
+				clear(links[:1])
+				links = links[1:]
+
+				if _, ok := processed[link.url]; ok {
+					continue
+				}
+
+				inFlight++
+
+				go func() {
+					result := c.processLink(ctx, link)
+					select {
+					case done <- result:
+					case <-ctx.Done():
+						return
+					}
+				}()
+			}
+
+			if len(links) == 0 && inFlight == 0 {
+				return
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case result := <-done:
+				inFlight--
+
+				link := result.link
+				extractedLinks := result.extractedLinks
+				originalURL := link.url
+
+				if result.page == nil {
+					pageResult := PageResult{
+						OriginalURL: originalURL,
+						Depth:       result.link.depth,
+						Err:         result.err,
+					}
+
+					if httpErr, ok := errors.AsType[*HTTPError](result.err); ok {
+						pageResult.StatusCode = httpErr.StatusCode
+					}
+
+					if !sendResult(ctx, out, pageResult) {
+						return
+					}
+
+					continue
+				}
+
+				page := result.page
+				finalURL := page.url.String()
+
+				_, alreadyProcessed := processed[finalURL]
+				processed[originalURL] = struct{}{}
+				processed[finalURL] = struct{}{}
+				seen[finalURL] = struct{}{}
+
+				if alreadyProcessed {
+					continue
+				}
+
+				if result.err != nil {
+					if !sendResult(ctx, out, PageResult{
+						OriginalURL: result.link.url,
+						FinalURL:    finalURL,
+						Depth:       result.link.depth,
+						StatusCode:  page.statusCode,
+						HTML:        page.body,
+						Err:         result.err,
+					}) {
+						return
+					}
+
+					continue
+				}
+
+				added := 0
+
+				for _, extractedLink := range extractedLinks {
+					if _, ok := seen[extractedLink]; ok {
+						continue
+					}
+
+					if c.settings.HasLinkLimit() &&
+						added >= c.settings.MaxLinksPerPage {
+						break
+					}
+
+					seen[extractedLink] = struct{}{}
+
+					links = append(links, linkEntry{
+						url:   extractedLink,
+						depth: link.depth + 1,
+					})
+
+					added++
+				}
+
+				if !sendResult(ctx, out, PageResult{
+					OriginalURL: link.url,
+					FinalURL:    finalURL,
+					Depth:       link.depth,
+					StatusCode:  page.statusCode,
+					HTML:        page.body,
+				}) {
+					return
+				}
+			}
 		}
+	}()
 
-		if len(links) == 0 {
-			return nil
+	return out
+}
+
+func sendResult(
+	ctx context.Context,
+	out chan<- PageResult,
+	result PageResult,
+) bool {
+	select {
+	case out <- result:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (c *Crawler) processLink(ctx context.Context, link linkEntry) workResult {
+	page, err := c.fetch(ctx, link.url)
+	if err != nil {
+		return workResult{
+			link: link,
+			err:  fmt.Errorf("fetch: %w", err),
 		}
+	}
 
-		link := links[0]
-		clear(links[:1])
-		links = links[1:]
+	finalURL := page.url.String()
 
-		if _, ok := processed[link.url]; ok {
-			continue
-		}
-
-		page, err := c.fetch(ctx, link.url, processed)
+	if link.depth < c.settings.MaxDepth {
+		var err error
+		extractedLinks, err := c.pageLinks(page.body, finalURL)
 		if err != nil {
-			if errors.Is(err, errAlreadyProcessed) {
-				continue
+			return workResult{
+				link: link,
+				page: &page,
+				err:  fmt.Errorf("extract links: %w", err),
 			}
-
-			result := PageResult{
-				OriginalURL: link.url,
-				Depth:       link.depth,
-				Err:         err,
-			}
-			if httpErr, ok := errors.AsType[*HTTPError](err); ok {
-				result.StatusCode = httpErr.StatusCode
-			}
-			clientErr := onResult(result)
-
-			if clientErr != nil {
-				return clientErr
-			}
-			if link.depth == 0 {
-				return fmt.Errorf("start page fetch: %w", err)
-			}
-			log.Printf("skip url <%s> with error: %v", link.url, err)
-			continue
 		}
 
-		finalURL := page.url.String()
-		_, alreadyProcessed := processed[finalURL]
-		seen[finalURL] = struct{}{}
-		processed[link.url] = struct{}{}
-		processed[finalURL] = struct{}{}
-		if alreadyProcessed {
-			continue
+		return workResult{
+			link:           link,
+			page:           &page,
+			extractedLinks: extractedLinks,
 		}
+	}
 
-		clientErr := onResult(PageResult{
-			OriginalURL: link.url,
-			FinalURL:    finalURL,
-			Depth:       link.depth,
-			StatusCode:  page.statusCode,
-			HTML:        page.body,
-			Err:         nil,
-		})
-		if clientErr != nil {
-			return clientErr
-		}
-
-		if link.depth >= c.settings.MaxDepth {
-			continue
-		}
-
-		extractedLinks, err := c.pageLinks(page.body, finalURL, seen)
-		if err != nil {
-			return err
-		}
-
-		for _, extractedLink := range extractedLinks {
-			seen[extractedLink] = struct{}{}
-			links = append(links, linkEntry{
-				url:   extractedLink,
-				depth: link.depth + 1,
-			})
-		}
+	return workResult{
+		link: link,
+		page: &page,
 	}
 }
