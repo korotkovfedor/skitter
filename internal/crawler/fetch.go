@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -111,13 +112,47 @@ func doWithRetry(
 			return resp, nil
 		}
 
+		delay := retryDelay(resp, retryLatency)
 		resp.Body.Close()
-		if err := waitForRetry(ctx, retryLatency); err != nil {
+
+		if err := waitForRetry(ctx, delay); err != nil {
 			return nil, err
 		}
 	}
 
 	return nil, errors.New("unreachable retry state")
+}
+
+func retryDelay(resp *http.Response, fallback time.Duration) time.Duration {
+	if resp == nil {
+		return fallback
+	}
+
+	value := resp.Header.Get("Retry-After")
+	if value == "" {
+		return fallback
+	}
+
+	// Retry-After: <delay-seconds>
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds < 0 {
+			return fallback
+		}
+
+		return time.Duration(seconds) * time.Second
+	}
+
+	// Retry-After: <http-date>
+	if retryAt, err := http.ParseTime(value); err == nil {
+		delay := time.Until(retryAt)
+		if delay > 0 {
+			return delay
+		}
+
+		return 0
+	}
+
+	return fallback
 }
 
 func waitForRetry(ctx context.Context, retryLatency time.Duration) error {

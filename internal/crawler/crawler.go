@@ -34,6 +34,7 @@ type Settings struct {
 
 	// RetryLatency is the delay between retry attempts.
 	// Zero retries immediately.
+	// Ignored if response contains 'Retry-After' header.
 	RetryLatency time.Duration
 }
 
