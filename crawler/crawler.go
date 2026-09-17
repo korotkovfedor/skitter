@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const defaultUserAgent = "SkitterBot/0.1"
+
 // Settings controls the requests and traversal performed by each [Crawler.Run].
 // New rejects negative numeric values and copies the settings.
 // The zero value fetches only the starting page, with one worker, no retries,
@@ -45,6 +47,11 @@ type Settings struct {
 	// It does not include a scheme and does not implicitly allow subdomains.
 	// An empty value allows any host. HTTP and HTTPS are both allowed.
 	TargetHost string
+
+	// UserAgent is the User-Agent header set on page requests and retries.
+	// An empty value uses "SkitterBot/0.1". The HTTP client carries the header
+	// through redirects unless a custom redirect hook or transport changes it.
+	UserAgent string
 
 	// MaxRetries is the maximum number of additional HTTP request attempts.
 	// Zero disables retries. Each attempt may follow redirects.
@@ -121,6 +128,9 @@ func New(client *http.Client, settings Settings) (*Crawler, error) {
 
 	if settings.MaxConcurrency == 0 {
 		settings.MaxConcurrency = 1
+	}
+	if settings.UserAgent == "" {
+		settings.UserAgent = defaultUserAgent
 	}
 
 	return &Crawler{

@@ -49,7 +49,7 @@
 // The crawler does not impose a whole-run deadline, a total page count limit,
 // a queue size limit, or a delay between unrelated requests. Use a context
 // deadline and appropriate settings to bound a run for the intended workload.
-// Requests set User-Agent to "SkitterBot/0.1".
+// Settings.UserAgent controls the User-Agent header; an empty value uses "SkitterBot/0.1".
 //
 // The crawler does not execute JavaScript, honor HTML base elements, check
 // Content-Type before parsing, or consult robots.txt. These behaviors are not

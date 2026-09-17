@@ -40,7 +40,7 @@ func (c *Crawler) fetch(ctx context.Context, targetURL string) (fetchedPage, err
 		return nil
 	}
 
-	req.Header.Set("User-Agent", "SkitterBot/0.1")
+	req.Header.Set("User-Agent", c.settings.UserAgent)
 	resp, err := doWithRetry(ctx, &client, req, c.settings.MaxRetries, c.settings.RetryLatency)
 	if err != nil {
 		// A rejected redirect can return both an error and a response.

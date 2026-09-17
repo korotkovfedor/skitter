@@ -11,6 +11,62 @@ import (
 	"time"
 )
 
+func TestRunSendsUserAgentOnRetriesRedirectsAndChildPages(t *testing.T) {
+	tests := []struct {
+		name      string
+		userAgent string
+		want      string
+	}{
+		{name: "default", want: "SkitterBot/0.1"},
+		{name: "custom", userAgent: "CatalogIndexer/1.0 (+https://example.com/bot)", want: "CatalogIndexer/1.0 (+https://example.com/bot)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests, rootAttempts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				if got := r.Header.Get("User-Agent"); got != tt.want {
+					t.Errorf("%s User-Agent = %q, want %q", r.URL.Path, got, tt.want)
+				}
+				switch r.URL.Path {
+				case "/":
+					if rootAttempts.Add(1) == 1 {
+						http.Error(w, "temporary", http.StatusServiceUnavailable)
+						return
+					}
+					http.Redirect(w, r, "/landing", http.StatusFound)
+				case "/landing":
+					_, _ = io.WriteString(w, `<a href="/child">child</a>`)
+				case "/child":
+					_, _ = io.WriteString(w, "leaf")
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			crawler, startURL := newTestCrawler(t, server, Settings{
+				UserAgent:  tt.userAgent,
+				MaxDepth:   1,
+				MaxRetries: 1,
+			})
+			results := collectResults(t, crawler, startURL)
+			if len(results) != 2 {
+				t.Fatalf("result count = %d, want 2", len(results))
+			}
+			for _, result := range results {
+				if result.Err != nil || result.Page == nil {
+					t.Fatalf("result = %+v, want successful page", result)
+				}
+			}
+			if got := requests.Load(); got != 4 {
+				t.Fatalf("requests = %d, want initial request, retry, redirect, and child", got)
+			}
+		})
+	}
+}
+
 func TestRunReportsResponseSizeLimit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "four")
