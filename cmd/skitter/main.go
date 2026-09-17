@@ -5,20 +5,21 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/korotkovfedor/skitter/internal/crawler"
 )
 
 func main() {
-	targetUrl, err := url.Parse("https://quotes.toscrape.com/")
+	targetURL, err := url.Parse("https://quotes.toscrape.com/")
 	if err != nil {
 		panic(err)
 	}
 
 	client := http.DefaultClient
 	settings := crawler.Settings{
-		TargetHost:      targetUrl.Host,
+		TargetHost:      targetURL.Host,
 		MaxLinksPerPage: 10,
 		MaxDepth:        2,
 		MaxConcurrency:  10,
@@ -32,12 +33,17 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*90)
 	defer cancel()
 
-	in, err := c.Run(ctx, targetUrl)
+	in, err := c.Run(ctx, targetURL)
 	if err != nil {
 		panic(err)
 	}
 
-	for page := range in {
-		fmt.Println(page.Page.URL)
+	for result := range in {
+		if result.Err != nil {
+			fmt.Fprintf(os.Stderr, "%s: %v\n", result.OriginalURL, result.Err)
+		}
+		if result.Page != nil {
+			fmt.Println(result.Page.URL)
+		}
 	}
 }

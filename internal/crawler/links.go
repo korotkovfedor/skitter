@@ -9,50 +9,50 @@ import (
 	"golang.org/x/net/html"
 )
 
-func (c *Crawler) pageLinks(pageHTML string, baseURL string) ([]string, error) {
+func (c *Crawler) extractPageURLs(pageHTML string, baseURL string) ([]string, error) {
 	body, err := html.Parse(strings.NewReader(pageHTML))
 	if err != nil {
 		return nil, err
 	}
 
-	extractedLinks := extractLinks(body)
-	extractedLinks, err = convertToAbs(baseURL, extractedLinks)
+	hrefs := extractHrefs(body)
+	urls, err := resolveURLs(baseURL, hrefs)
 	if err != nil {
 		return nil, err
 	}
 
 	if c.settings.TargetHost != "" {
-		extractedLinks, err = c.reduceUntargeted(extractedLinks)
+		urls, err = c.filterTargetURLs(urls)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	return extractedLinks, nil
+	return urls, nil
 }
 
-func (c *Crawler) reduceUntargeted(links []string) ([]string, error) {
+func (c *Crawler) filterTargetURLs(urls []string) ([]string, error) {
 	if c.settings.TargetHost == "" {
 		return nil, errors.New("target host is empty")
 	}
 
-	targetedLinks := make([]string, 0)
-	for _, link := range links {
-		u, err := url.Parse(link)
+	targetURLs := make([]string, 0)
+	for _, rawURL := range urls {
+		parsedURL, err := url.Parse(rawURL)
 		if err != nil {
-			return nil, fmt.Errorf("parse while reducing untargeted: %w", err)
+			return nil, fmt.Errorf("parse URL while filtering target host: %w", err)
 		}
 
-		if u.Host == c.settings.TargetHost {
-			targetedLinks = append(targetedLinks, u.String())
+		if parsedURL.Host == c.settings.TargetHost {
+			targetURLs = append(targetURLs, parsedURL.String())
 		}
 	}
 
-	return targetedLinks, nil
+	return targetURLs, nil
 }
 
-func extractLinks(root *html.Node) []string {
-	links := make([]string, 0)
+func extractHrefs(root *html.Node) []string {
+	hrefs := make([]string, 0)
 	stack := []*html.Node{root}
 
 	for len(stack) > 0 {
@@ -60,8 +60,8 @@ func extractLinks(root *html.Node) []string {
 		node := stack[last]
 		stack = stack[:last]
 
-		if href, ok := linkHref(node); ok {
-			links = append(links, href)
+		if href, ok := findHref(node); ok {
+			hrefs = append(hrefs, href)
 			continue
 		}
 
@@ -70,10 +70,10 @@ func extractLinks(root *html.Node) []string {
 		}
 	}
 
-	return links
+	return hrefs
 }
 
-func linkHref(node *html.Node) (string, bool) {
+func findHref(node *html.Node) (string, bool) {
 	if node.Type != html.ElementNode || node.Data != "a" {
 		return "", false
 	}
@@ -87,83 +87,43 @@ func linkHref(node *html.Node) (string, bool) {
 	return "", false
 }
 
-func convertToAbs(baseUrlString string, links []string) ([]string, error) {
-	baseUrl, err := url.Parse(baseUrlString)
+func resolveURLs(rawBaseURL string, hrefs []string) ([]string, error) {
+	baseURL, err := url.Parse(rawBaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("parse url: %w", err)
+		return nil, fmt.Errorf("parse base URL: %w", err)
 	}
 
-	convertedLinks := make([]string, 0)
+	convertedURLs := make([]string, 0)
 
-	for _, link := range links {
-		l, err := url.Parse(link)
+	for _, href := range hrefs {
+		referenceURL, err := url.Parse(href)
 		if err != nil {
 			continue
 		}
 
-		absoluteUrl := baseUrl.ResolveReference(l)
+		absoluteURL := baseURL.ResolveReference(referenceURL)
 
-		if !isHttp(absoluteUrl) {
+		if !isHTTP(absoluteURL) {
 			continue
 		}
 
-		cleanedUrl := cleanUpUrl(*absoluteUrl)
-		convertedLinks = append(convertedLinks, cleanedUrl.String())
+		cleanedURL := cleanUpURL(*absoluteURL)
+		convertedURLs = append(convertedURLs, cleanedURL.String())
 	}
 
-	return convertedLinks, nil
+	return convertedURLs, nil
 }
 
-func isHttp(url *url.URL) bool {
-	schemeValid := url.Scheme == "https" || url.Scheme == "http"
-	hostValid := url.Hostname() != ""
+func isHTTP(parsedURL *url.URL) bool {
+	schemeValid := parsedURL.Scheme == "https" || parsedURL.Scheme == "http"
+	hostValid := parsedURL.Hostname() != ""
 
 	return schemeValid && hostValid
 }
 
-func cleanUpUrl(u url.URL) url.URL {
-	u.Fragment = ""
-	u.RawFragment = ""
+func cleanUpURL(parsedURL url.URL) url.URL {
+	parsedURL.Fragment = ""
+	parsedURL.RawFragment = ""
 
-	return u
-}
-
-func removeDuplicates(array []string) []string {
-	seen := map[string]struct{}{}
-	unique := make([]string, 0)
-
-	for _, el := range array {
-		_, ok := seen[el]
-		if ok {
-			continue
-		}
-
-		seen[el] = struct{}{}
-		unique = append(unique, el)
-	}
-
-	return unique
-}
-
-func removeExceeds(array []string, limit int) []string {
-	if len(array) > limit {
-		return array[:limit]
-	}
-
-	return array
-}
-
-func removeSeen(array []string, seen map[string]struct{}) []string {
-	unseen := make([]string, 0)
-
-	for _, el := range array {
-		_, ok := seen[el]
-		if ok {
-			continue
-		}
-
-		unseen = append(unseen, el)
-	}
-
-	return unseen
+	return parsedURL
 }

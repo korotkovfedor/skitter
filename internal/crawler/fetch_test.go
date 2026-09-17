@@ -31,8 +31,8 @@ func TestRunReportsResponseSizeLimit(t *testing.T) {
 	if results[0].StatusCode != http.StatusOK {
 		t.Fatalf("PageResult.StatusCode = %d, want %d", results[0].StatusCode, http.StatusOK)
 	}
-	if results[0].HTML != "" || results[0].FinalURL != "" {
-		t.Fatalf("failed PageResult contains HTML or FinalURL: %+v", results[0])
+	if results[0].Page != nil {
+		t.Fatalf("failed PageResult contains a page: %+v", results[0])
 	}
 }
 
@@ -86,7 +86,7 @@ func TestRunRetriesTemporaryResponse(t *testing.T) {
 	if attempts.Load() != 2 {
 		t.Fatalf("request attempts = %d, want 2", attempts.Load())
 	}
-	if len(results) != 1 || results[0].StatusCode != http.StatusOK || results[0].HTML != "recovered" {
+	if len(results) != 1 || results[0].StatusCode != http.StatusOK || results[0].Page == nil || results[0].Page.HTML != "recovered" {
 		t.Fatalf("results = %+v, want recovered 200 response", results)
 	}
 }

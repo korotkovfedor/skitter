@@ -70,7 +70,10 @@ func finalPaths(t *testing.T, results []PageResult) []string {
 	t.Helper()
 	paths := make([]string, 0, len(results))
 	for _, result := range results {
-		paths = append(paths, pathFromURL(t, result.FinalURL))
+		if result.Page == nil {
+			t.Fatalf("result page = nil: %+v", result)
+		}
+		paths = append(paths, pathFromURL(t, result.Page.URL))
 	}
 	return paths
 }

@@ -99,8 +99,11 @@ func TestRunFetchesPagesConcurrently(t *testing.T) {
 
 	select {
 	case root := <-resultsCh:
-		if pathFromURL(t, root.FinalURL) != "/" {
-			t.Fatalf("first result path = %q, want root", root.FinalURL)
+		if root.Page == nil {
+			t.Fatalf("first result page = nil, want root page: %+v", root)
+		}
+		if pathFromURL(t, root.Page.URL) != "/" {
+			t.Fatalf("first result path = %q, want root", root.Page.URL)
 		}
 	case <-ctx.Done():
 		t.Fatalf("root result was not delivered: %v", ctx.Err())
@@ -166,8 +169,8 @@ func TestRunReportsChildFetchErrorAndContinues(t *testing.T) {
 	if !found {
 		t.Fatalf("results = %+v, want failed /unavailable result", results)
 	}
-	if pathFromURL(t, failed.OriginalURL) != "/unavailable" || failed.FinalURL != "" {
-		t.Fatalf("failed result URLs = original %q, final %q", failed.OriginalURL, failed.FinalURL)
+	if pathFromURL(t, failed.OriginalURL) != "/unavailable" || failed.Page != nil {
+		t.Fatalf("failed result URLs/page = original %q, page %+v", failed.OriginalURL, failed.Page)
 	}
 	if failed.Depth != 1 || failed.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("failed result depth/status = %d/%d", failed.Depth, failed.StatusCode)

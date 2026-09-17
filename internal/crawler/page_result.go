@@ -2,24 +2,27 @@ package crawler
 
 import "errors"
 
+// PageResult describes the outcome of fetching a page and, when needed, extracting its URLs.
+type PageResult struct {
+	Depth       int
+	OriginalURL string
+	// StatusCode is the HTTP response status, or zero if unavailable.
+	StatusCode int
+	// Page is present after a successful fetch, even if URL extraction fails.
+	Page *Page
+	// Err reports a fetch or URL extraction failure through *CrawlError.
+	Err error
+}
+
 type Page struct {
 	URL  string
 	HTML string
 }
 
-// PageResult describes the outcome of fetching a single page.
-type PageResult struct {
-	Depth       int
-	OriginalURL string
-	StatusCode  int
-	Page        *Page
-	Err         error
-}
-
 func (r workResult) pageResult() PageResult {
 	result := PageResult{
-		Depth:       r.link.depth,
-		OriginalURL: r.link.url,
+		Depth:       r.job.depth,
+		OriginalURL: r.job.url,
 		Err:         r.err,
 	}
 

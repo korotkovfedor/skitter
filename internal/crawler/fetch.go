@@ -74,7 +74,7 @@ func (c *Crawler) fetch(ctx context.Context, targetURL string) (fetchedPage, err
 	}
 	return fetchedPage{
 		body:       string(body),
-		url:        cleanUpUrl(*finalURL),
+		url:        cleanUpURL(*finalURL),
 		statusCode: resp.StatusCode,
 	}, nil
 }

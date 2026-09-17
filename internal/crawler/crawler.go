@@ -47,7 +47,7 @@ func (s Settings) validate() error {
 	}
 
 	if s.MaxConcurrency < 0 {
-		return errors.New("MaxConnections is less than 0")
+		return errors.New("MaxConcurrency is less than 0")
 	}
 
 	if s.MaxLinksPerPage < 0 {
@@ -96,42 +96,43 @@ func New(client *http.Client, settings Settings) (*Crawler, error) {
 //
 // If the caller stops consuming results before the returned channel is closed,
 // it must cancel ctx.
-func (c *Crawler) Run(ctx context.Context, startUrl *url.URL) (<-chan PageResult, error) {
-	if startUrl == nil {
-		return nil, errors.New("startUrl is nil")
+func (c *Crawler) Run(ctx context.Context, startURL *url.URL) (<-chan PageResult, error) {
+	if startURL == nil {
+		return nil, errors.New("startURL is nil")
 	}
 
-	if !isHttp(startUrl) {
-		return nil, errors.New("startUrl does not support HTTP")
+	if !isHTTP(startURL) {
+		return nil, errors.New("startURL does not support HTTP")
 	}
 
-	if c.settings.TargetHost != "" && startUrl.Host != c.settings.TargetHost {
-		return nil, errors.New("targetHost does not match startUrl")
+	if c.settings.TargetHost != "" && startURL.Host != c.settings.TargetHost {
+		return nil, errors.New("targetHost does not match startURL")
 	}
 
-	return c.crawl(ctx, startUrl), nil
+	return c.crawl(ctx, startURL), nil
 }
 
-type linkEntry struct {
+type crawlJob struct {
 	url   string
 	depth int
 }
 
 type workResult struct {
-	link           linkEntry
-	page           *fetchedPage
-	extractedLinks []string
-	err            error
+	job           crawlJob
+	page          *fetchedPage
+	extractedURLs []string
+	err           error
 }
 
 type crawlState struct {
-	queue []linkEntry
+	queue []crawlJob
 	seen  map[string]struct{}
 	// Unlike seen, processed contains only URLs whose page was fetched.
 	// It includes both the requested address and the final redirect address.
 	processed map[string]struct{}
 }
 
+// registerPage records both addresses and reports whether finalURL was already processed.
 func (s *crawlState) registerPage(originalURL, finalURL string) bool {
 	alreadyProcessed := s.isProcessed(finalURL)
 
@@ -142,14 +143,13 @@ func (s *crawlState) registerPage(originalURL, finalURL string) bool {
 	return alreadyProcessed
 }
 
-// enqueueLinks добавляет в очередь ещё не встречавшиеся ссылки с переданной глубиной,
+// enqueueURLs добавляет в очередь ещё не встречавшиеся ссылки с переданной глубиной,
 // применяя лимит после исключения уже встреченных. Здесь же обновляет seen.
-// TODO: Надо определиться, что значит link и что url. Здесь оперируем строками, не linkEntry
-func (s *crawlState) enqueueLinks(links []string, depth, limit int) {
+func (s *crawlState) enqueueURLs(urls []string, depth, limit int) {
 	added := 0
 
-	for _, link := range links {
-		if s.hasSeen(link) {
+	for _, targetURL := range urls {
+		if s.hasSeen(targetURL) {
 			continue
 		}
 
@@ -157,10 +157,10 @@ func (s *crawlState) enqueueLinks(links []string, depth, limit int) {
 			break
 		}
 
-		s.seen[link] = struct{}{}
+		s.seen[targetURL] = struct{}{}
 
-		s.pushLink(linkEntry{
-			url:   link,
+		s.pushJob(crawlJob{
+			url:   targetURL,
 			depth: depth,
 		})
 
@@ -168,43 +168,45 @@ func (s *crawlState) enqueueLinks(links []string, depth, limit int) {
 	}
 }
 
-// TODO: точно норм, что работаем с linkEntry?
-func (s *crawlState) popLink() linkEntry {
-	link := s.queue[0]
+func (s *crawlState) popJob() (crawlJob, bool) {
+	if len(s.queue) == 0 {
+		return crawlJob{}, false
+	}
+
+	job := s.queue[0]
 	clear(s.queue[:1])
 	s.queue = s.queue[1:]
-	return link
+
+	return job, true
 }
 
-func (s *crawlState) pushLink(link linkEntry) {
-	s.queue = append(s.queue, link)
+func (s *crawlState) pushJob(job crawlJob) {
+	s.queue = append(s.queue, job)
 }
 
-func (s *crawlState) isProcessed(url string) bool {
-	_, ok := s.processed[url]
+func (s *crawlState) isProcessed(targetURL string) bool {
+	_, ok := s.processed[targetURL]
 	return ok
 }
 
-func (s *crawlState) hasSeen(url string) bool {
-	_, ok := s.seen[url]
+func (s *crawlState) hasSeen(targetURL string) bool {
+	_, ok := s.seen[targetURL]
 	return ok
 }
 
-// Bounded goroutines
-// [crawl]: owns q, seen, processed
-// spawns at most MaxConnections goroutines for fetch and extract
-// [spawned]: fetch n parse
-func (c *Crawler) crawl(ctx context.Context, startUrl *url.URL) <-chan PageResult {
+// crawl keeps the queue, seen, and processed in one coordinator goroutine.
+// At most MaxConcurrency workers fetch pages and extract URLs concurrently.
+func (c *Crawler) crawl(ctx context.Context, startURL *url.URL) <-chan PageResult {
 	out := make(chan PageResult)
 
 	go func() {
 		defer close(out)
 
-		cleanUrl := cleanUpUrl(*startUrl)
+		cleanURL := cleanUpURL(*startURL)
 
 		state := crawlState{
-			queue:     []linkEntry{{url: cleanUrl.String(), depth: 0}},
-			seen:      map[string]struct{}{cleanUrl.String(): {}},
+			queue:     []crawlJob{{url: cleanURL.String(), depth: 0}},
+			seen:      map[string]struct{}{cleanURL.String(): {}},
 			processed: map[string]struct{}{},
 		}
 
@@ -216,17 +218,20 @@ func (c *Crawler) crawl(ctx context.Context, startUrl *url.URL) <-chan PageResul
 				return
 			}
 
-			for len(state.queue) > 0 && inFlight < c.settings.MaxConcurrency {
-				link := state.popLink()
+			for inFlight < c.settings.MaxConcurrency {
+				job, ok := state.popJob()
+				if !ok {
+					break
+				}
 
-				if state.isProcessed(link.url) {
+				if state.isProcessed(job.url) {
 					continue
 				}
 
 				inFlight++
 
 				go func() {
-					result := c.processLink(ctx, link)
+					result := c.processJob(ctx, job)
 					select {
 					case done <- result:
 					case <-ctx.Done():
@@ -246,14 +251,14 @@ func (c *Crawler) crawl(ctx context.Context, startUrl *url.URL) <-chan PageResul
 				inFlight--
 
 				if result.page != nil {
-					alreadyProcessed := state.registerPage(result.link.url, result.page.url.String())
+					alreadyProcessed := state.registerPage(result.job.url, result.page.url.String())
 
 					if alreadyProcessed {
 						continue
 					}
 
 					if result.err == nil {
-						state.enqueueLinks(result.extractedLinks, result.link.depth+1, c.settings.MaxLinksPerPage)
+						state.enqueueURLs(result.extractedURLs, result.job.depth+1, c.settings.MaxLinksPerPage)
 					}
 				}
 
@@ -269,39 +274,32 @@ func (c *Crawler) crawl(ctx context.Context, startUrl *url.URL) <-chan PageResul
 	return out
 }
 
-func (c *Crawler) processLink(ctx context.Context, link linkEntry) workResult {
-	page, err := c.fetch(ctx, link.url)
+func (c *Crawler) processJob(ctx context.Context, job crawlJob) workResult {
+	page, err := c.fetch(ctx, job.url)
 	if err != nil {
 		return workResult{
-			link: link,
-			err:  &CrawlError{Stage: StageFetch, Err: err},
+			job: job,
+			err: &CrawlError{Stage: StageFetch, Err: err},
 		}
 	}
 
-	finalURL := page.url.String()
-
-	if link.depth < c.settings.MaxDepth {
-		var err error
-		extractedLinks, err := c.pageLinks(page.body, finalURL)
-		if err != nil {
-			return workResult{
-				link: link,
-				page: &page,
-				err:  &CrawlError{Stage: StageExtractLinks, Err: err},
-			}
-		}
-
-		return workResult{
-			link:           link,
-			page:           &page,
-			extractedLinks: extractedLinks,
-		}
-	}
-
-	return workResult{
-		link: link,
+	result := workResult{
+		job:  job,
 		page: &page,
 	}
+
+	if job.depth < c.settings.MaxDepth {
+		urls, err := c.extractPageURLs(page.body, page.url.String())
+		if err != nil {
+			result.err = &CrawlError{Stage: StageExtractLinks, Err: err}
+
+			return result
+		}
+
+		result.extractedURLs = urls
+	}
+
+	return result
 }
 
 func sendResult(

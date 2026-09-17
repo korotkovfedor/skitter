@@ -7,7 +7,7 @@ import (
 	"golang.org/x/net/html"
 )
 
-func TestExtractLinksPreservesHTMLOrder(t *testing.T) {
+func TestExtractHrefsPreservesHTMLOrder(t *testing.T) {
 	root := &html.Node{Type: html.DocumentNode}
 	container := &html.Node{Type: html.ElementNode, Data: "div"}
 	first := &html.Node{Type: html.ElementNode, Data: "a", Attr: []html.Attribute{{Key: "href", Val: "/first"}}}
@@ -20,12 +20,12 @@ func TestExtractLinksPreservesHTMLOrder(t *testing.T) {
 	root.AppendChild(third)
 
 	want := []string{"/first", "/second", "/third"}
-	if got := extractLinks(root); !reflect.DeepEqual(got, want) {
-		t.Fatalf("extractLinks() = %v, want %v", got, want)
+	if got := extractHrefs(root); !reflect.DeepEqual(got, want) {
+		t.Fatalf("extractHrefs() = %v, want %v", got, want)
 	}
 }
 
-func TestExtractLinksSkipsDescendantsOfLinkedAnchor(t *testing.T) {
+func TestExtractHrefsSkipsDescendantsOfLinkedAnchor(t *testing.T) {
 	root := &html.Node{Type: html.DocumentNode}
 	outer := &html.Node{Type: html.ElementNode, Data: "a", Attr: []html.Attribute{{Key: "href", Val: "/outer"}}}
 	nested := &html.Node{Type: html.ElementNode, Data: "a", Attr: []html.Attribute{{Key: "href", Val: "/nested"}}}
@@ -36,7 +36,7 @@ func TestExtractLinksSkipsDescendantsOfLinkedAnchor(t *testing.T) {
 	root.AppendChild(after)
 
 	want := []string{"/outer", "/after"}
-	if got := extractLinks(root); !reflect.DeepEqual(got, want) {
-		t.Fatalf("extractLinks() = %v, want %v", got, want)
+	if got := extractHrefs(root); !reflect.DeepEqual(got, want) {
+		t.Fatalf("extractHrefs() = %v, want %v", got, want)
 	}
 }

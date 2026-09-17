@@ -44,7 +44,10 @@ func TestRunVisitsPagesAtExpectedDepths(t *testing.T) {
 		"/b/one": 2,
 	}
 	for _, result := range results {
-		path := pathFromURL(t, result.FinalURL)
+		if result.Page == nil {
+			t.Fatalf("result page = nil: %+v", result)
+		}
+		path := pathFromURL(t, result.Page.URL)
 		if result.Depth != wantDepths[path] {
 			t.Errorf("result %q depth = %d, want %d", path, result.Depth, wantDepths[path])
 		}

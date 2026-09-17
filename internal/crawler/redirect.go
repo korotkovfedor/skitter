@@ -24,7 +24,7 @@ func newCrawlerClient(client *http.Client, settings Settings) *http.Client {
 		}
 
 		// Check after the caller's hook, which may modify the next request.
-		if req.URL == nil || !isHttp(req.URL) {
+		if req.URL == nil || !isHTTP(req.URL) {
 			return errors.New("redirect URL must use HTTP or HTTPS and have a host")
 		}
 		if settings.TargetHost != "" && req.URL.Host != settings.TargetHost {
