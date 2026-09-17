@@ -173,6 +173,10 @@ func (c *Crawler) Run(ctx context.Context, startURL *url.URL) (<-chan PageResult
 		return nil, errors.New("targetHost does not match startURL")
 	}
 
+	if ctx == nil {
+		return nil, errors.New("ctx is nil")
+	}
+
 	return c.crawl(ctx, startURL), nil
 }
 
