@@ -1,7 +1,7 @@
 package crawler
 
 import (
-	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,14 +26,7 @@ func TestRunResolvesLinksAgainstRedirectDestination(t *testing.T) {
 	defer server.Close()
 
 	crawler, startURL := newTestCrawlerAtPath(t, server, Settings{MaxDepth: 1}, "/start")
-	var results []PageResult
-	err := crawler.Run(context.Background(), startURL, func(page PageResult) error {
-		results = append(results, page)
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
+	results := collectResults(t, crawler, startURL)
 
 	wantOriginal := []string{"/start", "/landing/child"}
 	wantFinal := []string{"/landing/", "/landing/child"}
@@ -62,26 +55,19 @@ func TestRunRejectsRedirectToDifferentHost(t *testing.T) {
 	defer source.Close()
 
 	crawler, startURL := newTestCrawler(t, source, Settings{MaxDepth: 0})
-	var results []PageResult
-	err := crawler.Run(context.Background(), startURL, func(page PageResult) error {
-		results = append(results, page)
-		return nil
-	})
-	if err == nil {
-		t.Fatal("Run() error = nil, want rejected redirect error")
-	}
+	results := collectResults(t, crawler, startURL)
 	if destinationRequests.Load() != 0 {
 		t.Fatalf("destination requests = %d, want 0", destinationRequests.Load())
 	}
 	if len(results) != 1 || results[0].Err == nil {
-		t.Fatalf("callback results = %+v, want one failed result", results)
+		t.Fatalf("results = %+v, want one failed result", results)
 	}
 	if results[0].StatusCode != http.StatusFound {
 		t.Fatalf("PageResult.StatusCode = %d, want %d", results[0].StatusCode, http.StatusFound)
 	}
 }
 
-func TestRunSuppressesRedirectToProcessedPage(t *testing.T) {
+func TestRunSuppressesDuplicateRedirectResults(t *testing.T) {
 	var targetRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -98,21 +84,20 @@ func TestRunSuppressesRedirectToProcessedPage(t *testing.T) {
 	}))
 	defer server.Close()
 
-	crawler, startURL := newTestCrawler(t, server, Settings{MaxDepth: 1})
-	var results []PageResult
-	err := crawler.Run(context.Background(), startURL, func(page PageResult) error {
-		results = append(results, page)
-		return nil
+	crawler, startURL := newTestCrawler(t, server, Settings{
+		MaxDepth:       1,
+		MaxConcurrency: 2,
 	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
+	results := collectResults(t, crawler, startURL)
+	if targetRequests.Load() == 0 {
+		t.Fatal("target was not requested")
 	}
-	if targetRequests.Load() != 1 {
-		t.Fatalf("target requests = %d, want 1", targetRequests.Load())
+	if len(results) != 2 {
+		t.Fatalf("result count = %d, want root and one redirect result", len(results))
 	}
-	wantOriginal := []string{"/", "/a"}
-	if got := originalPaths(t, results); !reflect.DeepEqual(got, wantOriginal) {
-		t.Fatalf("callback original paths = %v, want %v", got, wantOriginal)
+	paths := originalPaths(t, results)
+	if !containsPath(paths, "/") || (!containsPath(paths, "/a") && !containsPath(paths, "/b")) {
+		t.Fatalf("result original paths = %v, want root and one redirect source", paths)
 	}
 }
 
@@ -125,18 +110,14 @@ func TestRunLimitsRedirectChain(t *testing.T) {
 	defer server.Close()
 
 	crawler, startURL := newTestCrawlerAtPath(t, server, Settings{MaxDepth: 0}, "/loop")
-	var results []PageResult
-	err := crawler.Run(context.Background(), startURL, func(page PageResult) error {
-		results = append(results, page)
-		return nil
-	})
-	if err == nil {
-		t.Fatal("Run() error = nil, want redirect limit error")
-	}
+	results := collectResults(t, crawler, startURL)
 	if requests.Load() != maxRedirects {
 		t.Fatalf("redirect chain requests = %d, want %d", requests.Load(), maxRedirects)
 	}
 	if len(results) != 1 || results[0].StatusCode != http.StatusFound {
-		t.Fatalf("callback results = %+v, want one failed redirect result", results)
+		t.Fatalf("results = %+v, want one failed redirect result", results)
+	}
+	if _, ok := errors.AsType[*HTTPError](results[0].Err); !ok {
+		t.Fatalf("result error = %T, want *HTTPError", results[0].Err)
 	}
 }

@@ -1,25 +1,39 @@
 package crawler
 
+import "errors"
+
+type Page struct {
+	URL  string
+	HTML string
+}
+
 // PageResult describes the outcome of fetching a single page.
 type PageResult struct {
-	// OriginalURL is the requested URL before redirects.
+	Depth       int
 	OriginalURL string
+	StatusCode  int
+	Page        *Page
+	Err         error
+}
 
-	// FinalURL is the URL that produced the response after redirects.
-	// It is populated on success and empty on failure.
-	FinalURL string
+func (r workResult) pageResult() PageResult {
+	result := PageResult{
+		Depth:       r.link.depth,
+		OriginalURL: r.link.url,
+		Err:         r.err,
+	}
 
-	// Depth is the number of link transitions from the starting page.
-	// The starting page has depth zero; redirects do not increase it.
-	Depth int
+	if r.page != nil {
+		result.StatusCode = r.page.statusCode
+		result.Page = &Page{
+			URL:  r.page.url.String(),
+			HTML: r.page.body,
+		}
+	}
 
-	// StatusCode is the HTTP response status, or zero if no response was received.
-	StatusCode int
+	if httpErr, ok := errors.AsType[*HTTPError](r.err); ok {
+		result.StatusCode = httpErr.StatusCode
+	}
 
-	// HTML is the downloaded page content. It may be empty on failure.
-	HTML string
-
-	// Err describes a failure to fetch the page. It is nil on success.
-	// When a response status is available, errors.As can extract an *HTTPError.
-	Err error
+	return result
 }

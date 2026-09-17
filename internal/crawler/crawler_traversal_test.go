@@ -1,7 +1,6 @@
 package crawler
 
 import (
-	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestRunVisitsPagesInBFSOrder(t *testing.T) {
+func TestRunVisitsPagesAtExpectedDepths(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/":
@@ -26,19 +25,29 @@ func TestRunVisitsPagesInBFSOrder(t *testing.T) {
 	}))
 	defer server.Close()
 
-	crawler, startURL := newTestCrawler(t, server, Settings{MaxDepth: 2})
-	var results []PageResult
-	err := crawler.Run(context.Background(), startURL, func(page PageResult) error {
-		results = append(results, page)
-		return nil
+	crawler, startURL := newTestCrawler(t, server, Settings{
+		MaxDepth:       2,
+		MaxConcurrency: 3,
 	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
+	results := collectResults(t, crawler, startURL)
 
 	wantPaths := []string{"/", "/a", "/b", "/a/one", "/b/one"}
-	if got := finalPaths(t, results); !reflect.DeepEqual(got, wantPaths) {
-		t.Fatalf("callback paths = %v, want BFS order %v", got, wantPaths)
+	if got := sortedPaths(finalPaths(t, results)); !reflect.DeepEqual(got, sortedPaths(wantPaths)) {
+		t.Fatalf("result paths = %v, want pages %v", got, sortedPaths(wantPaths))
+	}
+
+	wantDepths := map[string]int{
+		"/":      0,
+		"/a":     1,
+		"/b":     1,
+		"/a/one": 2,
+		"/b/one": 2,
+	}
+	for _, result := range results {
+		path := pathFromURL(t, result.FinalURL)
+		if result.Depth != wantDepths[path] {
+			t.Errorf("result %q depth = %d, want %d", path, result.Depth, wantDepths[path])
+		}
 	}
 }
 
@@ -59,7 +68,7 @@ func TestRunRespectsTraversalLimits(t *testing.T) {
 			want:     []string{"/", "/a", "/b", "/c"},
 		},
 		{
-			name:     "per-page link limit preserves source order",
+			name:     "per-page link limit keeps the first links",
 			settings: Settings{MaxDepth: 1, MaxLinksPerPage: 2},
 			want:     []string{"/", "/a", "/b"},
 		},
@@ -82,17 +91,10 @@ func TestRunRespectsTraversalLimits(t *testing.T) {
 			defer server.Close()
 
 			crawler, startURL := newTestCrawler(t, server, tt.settings)
-			var results []PageResult
-			err := crawler.Run(context.Background(), startURL, func(page PageResult) error {
-				results = append(results, page)
-				return nil
-			})
-			if err != nil {
-				t.Fatalf("Run() error = %v", err)
-			}
+			results := collectResults(t, crawler, startURL)
 
-			if got := finalPaths(t, results); !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("callback paths = %v, want %v", got, tt.want)
+			if got := sortedPaths(finalPaths(t, results)); !reflect.DeepEqual(got, sortedPaths(tt.want)) {
+				t.Fatalf("result paths = %v, want %v", got, sortedPaths(tt.want))
 			}
 		})
 	}
@@ -115,17 +117,10 @@ func TestRunAppliesLinkLimitAfterSeenFiltering(t *testing.T) {
 		MaxDepth:        1,
 		MaxLinksPerPage: 1,
 	})
-	var results []PageResult
-	err := crawler.Run(context.Background(), startURL, func(page PageResult) error {
-		results = append(results, page)
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
+	results := collectResults(t, crawler, startURL)
 
 	want := []string{"/", "/c"}
-	if got := finalPaths(t, results); !reflect.DeepEqual(got, want) {
-		t.Fatalf("callback paths = %v, want %v", got, want)
+	if got := sortedPaths(finalPaths(t, results)); !reflect.DeepEqual(got, sortedPaths(want)) {
+		t.Fatalf("result paths = %v, want %v", got, sortedPaths(want))
 	}
 }

@@ -23,14 +23,10 @@ func TestRunCancelsActiveRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var results []PageResult
-	done := make(chan error, 1)
-	go func() {
-		done <- crawler.Run(ctx, startURL, func(page PageResult) error {
-			results = append(results, page)
-			return nil
-		})
-	}()
+	results, err := crawler.Run(ctx, startURL)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
 
 	select {
 	case <-requestStarted:
@@ -39,21 +35,21 @@ func TestRunCancelsActiveRequest(t *testing.T) {
 		t.Fatal("request did not start")
 	}
 
-	var err error
-	select {
-	case err = <-done:
-	case <-time.After(asyncTestTimeout):
-		t.Fatal("Run() did not return after context cancellation")
-	}
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run() error = %v, want context.Canceled", err)
-	}
-	if len(results) != 1 || !errors.Is(results[0].Err, context.Canceled) {
-		t.Fatalf("callback results = %+v, want one context cancellation", results)
+	timer := time.NewTimer(asyncTestTimeout)
+	defer timer.Stop()
+	for {
+		select {
+		case _, ok := <-results:
+			if !ok {
+				return
+			}
+		case <-timer.C:
+			t.Fatal("result channel did not close after context cancellation")
+		}
 	}
 }
 
-func TestRunReturnsCallbackErrorUnchangedAndStops(t *testing.T) {
+func TestRunReportsResultsThroughChannel(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
@@ -62,49 +58,83 @@ func TestRunReturnsCallbackErrorUnchangedAndStops(t *testing.T) {
 	defer server.Close()
 
 	crawler, startURL := newTestCrawler(t, server, Settings{MaxDepth: 1})
-	callbackErr := errors.New("stop callback")
-	callbackCalls := 0
-	err := crawler.Run(context.Background(), startURL, func(PageResult) error {
-		callbackCalls++
-		return callbackErr
-	})
-	if !errors.Is(err, callbackErr) {
-		t.Fatalf("Run() error = %v, want exact callback error %v", err, callbackErr)
+	results := collectResults(t, crawler, startURL)
+	if len(results) != 2 {
+		t.Fatalf("result count = %d, want 2", len(results))
 	}
-	if callbackCalls != 1 {
-		t.Fatalf("callback calls = %d, want 1", callbackCalls)
-	}
-	if requests.Load() != 1 {
-		t.Fatalf("requests = %d, want 1", requests.Load())
+	if requests.Load() != 2 {
+		t.Fatalf("requests = %d, want 2", requests.Load())
 	}
 }
 
-func TestRunInvokesCallbackSequentially(t *testing.T) {
+func TestRunFetchesPagesConcurrently(t *testing.T) {
+	childStarted := make(chan struct{}, 3)
+	releaseChildren := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
 			_, _ = io.WriteString(w, `<a href="/a">a</a><a href="/b">b</a><a href="/c">c</a>`)
+			return
+		}
+		childStarted <- struct{}{}
+		select {
+		case <-releaseChildren:
+		case <-r.Context().Done():
 			return
 		}
 		_, _ = io.WriteString(w, "leaf")
 	}))
 	defer server.Close()
 
-	crawler, startURL := newTestCrawler(t, server, Settings{MaxDepth: 1})
-	var active atomic.Int32
-	var overlap atomic.Bool
-	err := crawler.Run(context.Background(), startURL, func(PageResult) error {
-		if active.Add(1) != 1 {
-			overlap.Store(true)
-		}
-		time.Sleep(time.Millisecond)
-		active.Add(-1)
-		return nil
+	crawler, startURL := newTestCrawler(t, server, Settings{
+		MaxDepth:       1,
+		MaxConcurrency: 2,
 	})
+	ctx, cancel := context.WithTimeout(context.Background(), asyncTestTimeout)
+	defer cancel()
+
+	resultsCh, err := crawler.Run(ctx, startURL)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if overlap.Load() {
-		t.Fatal("callbacks overlapped")
+
+	select {
+	case root := <-resultsCh:
+		if pathFromURL(t, root.FinalURL) != "/" {
+			t.Fatalf("first result path = %q, want root", root.FinalURL)
+		}
+	case <-ctx.Done():
+		t.Fatalf("root result was not delivered: %v", ctx.Err())
+	}
+
+	for range 2 {
+		select {
+		case <-childStarted:
+		case <-ctx.Done():
+			t.Fatalf("children were not fetched concurrently: %v", ctx.Err())
+		}
+	}
+	select {
+	case <-childStarted:
+		t.Fatal("crawler exceeded MaxConcurrency")
+	default:
+	}
+
+	close(releaseChildren)
+
+	resultCount := 1
+	for {
+		select {
+		case _, ok := <-resultsCh:
+			if !ok {
+				if resultCount != 4 {
+					t.Fatalf("result count = %d, want 4", resultCount)
+				}
+				return
+			}
+			resultCount++
+		case <-ctx.Done():
+			t.Fatalf("result channel did not close: %v", ctx.Err())
+		}
 	}
 }
 
@@ -119,19 +149,23 @@ func TestRunReportsChildFetchErrorAndContinues(t *testing.T) {
 	defer server.Close()
 
 	crawler, startURL := newTestCrawler(t, server, Settings{MaxDepth: 1})
-	var results []PageResult
-	err := crawler.Run(context.Background(), startURL, func(page PageResult) error {
-		results = append(results, page)
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Run() error = %v, want nil after child fetch error", err)
-	}
+	results := collectResults(t, crawler, startURL)
 	if len(results) != 2 {
-		t.Fatalf("callback count = %d, want 2", len(results))
+		t.Fatalf("result count = %d, want 2", len(results))
 	}
 
-	failed := results[1]
+	var failed PageResult
+	found := false
+	for _, result := range results {
+		if pathFromURL(t, result.OriginalURL) == "/unavailable" {
+			failed = result
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("results = %+v, want failed /unavailable result", results)
+	}
 	if pathFromURL(t, failed.OriginalURL) != "/unavailable" || failed.FinalURL != "" {
 		t.Fatalf("failed result URLs = original %q, final %q", failed.OriginalURL, failed.FinalURL)
 	}

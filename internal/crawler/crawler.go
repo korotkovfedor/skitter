@@ -3,7 +3,6 @@ package crawler
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/url"
 	"time"
@@ -125,6 +124,72 @@ type workResult struct {
 	err            error
 }
 
+type crawlState struct {
+	queue []linkEntry
+	seen  map[string]struct{}
+	// Unlike seen, processed contains only URLs whose page was fetched.
+	// It includes both the requested address and the final redirect address.
+	processed map[string]struct{}
+}
+
+func (s *crawlState) registerPage(originalURL, finalURL string) bool {
+	alreadyProcessed := s.isProcessed(finalURL)
+
+	s.processed[originalURL] = struct{}{}
+	s.processed[finalURL] = struct{}{}
+	s.seen[finalURL] = struct{}{}
+
+	return alreadyProcessed
+}
+
+// enqueueLinks добавляет в очередь ещё не встречавшиеся ссылки с переданной глубиной,
+// применяя лимит после исключения уже встреченных. Здесь же обновляет seen.
+// TODO: Надо определиться, что значит link и что url. Здесь оперируем строками, не linkEntry
+func (s *crawlState) enqueueLinks(links []string, depth, limit int) {
+	added := 0
+
+	for _, link := range links {
+		if s.hasSeen(link) {
+			continue
+		}
+
+		if limit > 0 && added >= limit {
+			break
+		}
+
+		s.seen[link] = struct{}{}
+
+		s.pushLink(linkEntry{
+			url:   link,
+			depth: depth,
+		})
+
+		added++
+	}
+}
+
+// TODO: точно норм, что работаем с linkEntry?
+func (s *crawlState) popLink() linkEntry {
+	link := s.queue[0]
+	clear(s.queue[:1])
+	s.queue = s.queue[1:]
+	return link
+}
+
+func (s *crawlState) pushLink(link linkEntry) {
+	s.queue = append(s.queue, link)
+}
+
+func (s *crawlState) isProcessed(url string) bool {
+	_, ok := s.processed[url]
+	return ok
+}
+
+func (s *crawlState) hasSeen(url string) bool {
+	_, ok := s.seen[url]
+	return ok
+}
+
 // Bounded goroutines
 // [crawl]: owns q, seen, processed
 // spawns at most MaxConnections goroutines for fetch and extract
@@ -137,11 +202,11 @@ func (c *Crawler) crawl(ctx context.Context, startUrl *url.URL) <-chan PageResul
 
 		cleanUrl := cleanUpUrl(*startUrl)
 
-		links := []linkEntry{{url: cleanUrl.String(), depth: 0}}
-		seen := map[string]struct{}{cleanUrl.String(): {}}
-		// Unlike seen, processed contains only URLs whose page was fetched.
-		// It includes both the requested address and the final redirect address.
-		processed := map[string]struct{}{}
+		state := crawlState{
+			queue:     []linkEntry{{url: cleanUrl.String(), depth: 0}},
+			seen:      map[string]struct{}{cleanUrl.String(): {}},
+			processed: map[string]struct{}{},
+		}
 
 		inFlight := 0
 		done := make(chan workResult)
@@ -151,12 +216,10 @@ func (c *Crawler) crawl(ctx context.Context, startUrl *url.URL) <-chan PageResul
 				return
 			}
 
-			for len(links) > 0 && inFlight < c.settings.MaxConcurrency {
-				link := links[0]
-				clear(links[:1])
-				links = links[1:]
+			for len(state.queue) > 0 && inFlight < c.settings.MaxConcurrency {
+				link := state.popLink()
 
-				if _, ok := processed[link.url]; ok {
+				if state.isProcessed(link.url) {
 					continue
 				}
 
@@ -172,7 +235,7 @@ func (c *Crawler) crawl(ctx context.Context, startUrl *url.URL) <-chan PageResul
 				}()
 			}
 
-			if len(links) == 0 && inFlight == 0 {
+			if len(state.queue) == 0 && inFlight == 0 {
 				return
 			}
 
@@ -182,84 +245,21 @@ func (c *Crawler) crawl(ctx context.Context, startUrl *url.URL) <-chan PageResul
 			case result := <-done:
 				inFlight--
 
-				link := result.link
-				extractedLinks := result.extractedLinks
-				originalURL := link.url
+				if result.page != nil {
+					alreadyProcessed := state.registerPage(result.link.url, result.page.url.String())
 
-				if result.page == nil {
-					pageResult := PageResult{
-						OriginalURL: originalURL,
-						Depth:       result.link.depth,
-						Err:         result.err,
-					}
-
-					if httpErr, ok := errors.AsType[*HTTPError](result.err); ok {
-						pageResult.StatusCode = httpErr.StatusCode
-					}
-
-					if !sendResult(ctx, out, pageResult) {
-						return
-					}
-
-					continue
-				}
-
-				page := result.page
-				finalURL := page.url.String()
-
-				_, alreadyProcessed := processed[finalURL]
-				processed[originalURL] = struct{}{}
-				processed[finalURL] = struct{}{}
-				seen[finalURL] = struct{}{}
-
-				if alreadyProcessed {
-					continue
-				}
-
-				if result.err != nil {
-					if !sendResult(ctx, out, PageResult{
-						OriginalURL: result.link.url,
-						FinalURL:    finalURL,
-						Depth:       result.link.depth,
-						StatusCode:  page.statusCode,
-						HTML:        page.body,
-						Err:         result.err,
-					}) {
-						return
-					}
-
-					continue
-				}
-
-				added := 0
-
-				for _, extractedLink := range extractedLinks {
-					if _, ok := seen[extractedLink]; ok {
+					if alreadyProcessed {
 						continue
 					}
 
-					if c.settings.HasLinkLimit() &&
-						added >= c.settings.MaxLinksPerPage {
-						break
+					if result.err == nil {
+						state.enqueueLinks(result.extractedLinks, result.link.depth+1, c.settings.MaxLinksPerPage)
 					}
-
-					seen[extractedLink] = struct{}{}
-
-					links = append(links, linkEntry{
-						url:   extractedLink,
-						depth: link.depth + 1,
-					})
-
-					added++
 				}
 
-				if !sendResult(ctx, out, PageResult{
-					OriginalURL: link.url,
-					FinalURL:    finalURL,
-					Depth:       link.depth,
-					StatusCode:  page.statusCode,
-					HTML:        page.body,
-				}) {
+				pageResult := result.pageResult()
+
+				if !sendResult(ctx, out, pageResult) {
 					return
 				}
 			}
@@ -269,25 +269,12 @@ func (c *Crawler) crawl(ctx context.Context, startUrl *url.URL) <-chan PageResul
 	return out
 }
 
-func sendResult(
-	ctx context.Context,
-	out chan<- PageResult,
-	result PageResult,
-) bool {
-	select {
-	case out <- result:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
-
 func (c *Crawler) processLink(ctx context.Context, link linkEntry) workResult {
 	page, err := c.fetch(ctx, link.url)
 	if err != nil {
 		return workResult{
 			link: link,
-			err:  fmt.Errorf("fetch: %w", err),
+			err:  &CrawlError{Stage: StageFetch, Err: err},
 		}
 	}
 
@@ -300,7 +287,7 @@ func (c *Crawler) processLink(ctx context.Context, link linkEntry) workResult {
 			return workResult{
 				link: link,
 				page: &page,
-				err:  fmt.Errorf("extract links: %w", err),
+				err:  &CrawlError{Stage: StageExtractLinks, Err: err},
 			}
 		}
 
@@ -314,5 +301,18 @@ func (c *Crawler) processLink(ctx context.Context, link linkEntry) workResult {
 	return workResult{
 		link: link,
 		page: &page,
+	}
+}
+
+func sendResult(
+	ctx context.Context,
+	out chan<- PageResult,
+	result PageResult,
+) bool {
+	select {
+	case out <- result:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }

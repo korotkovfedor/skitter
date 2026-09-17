@@ -38,6 +38,6 @@ func main() {
 	}
 
 	for page := range in {
-		fmt.Println(page.FinalURL)
+		fmt.Println(page.Page.URL)
 	}
 }

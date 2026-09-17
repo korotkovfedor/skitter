@@ -1,8 +1,10 @@
 package crawler
 
 import (
+	"context"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"testing"
 	"time"
 )
@@ -30,6 +32,31 @@ func newTestCrawlerAtPath(t *testing.T, server *httptest.Server, settings Settin
 	return crawler, startURL
 }
 
+func collectResults(t *testing.T, crawler *Crawler, startURL *url.URL) []PageResult {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), asyncTestTimeout)
+	defer cancel()
+
+	resultCh, err := crawler.Run(ctx, startURL)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	results := make([]PageResult, 0)
+	for {
+		select {
+		case result, ok := <-resultCh:
+			if !ok {
+				return results
+			}
+			results = append(results, result)
+		case <-ctx.Done():
+			t.Fatalf("result channel did not close: %v", ctx.Err())
+		}
+	}
+}
+
 func originalPaths(t *testing.T, results []PageResult) []string {
 	t.Helper()
 	paths := make([]string, 0, len(results))
@@ -46,6 +73,20 @@ func finalPaths(t *testing.T, results []PageResult) []string {
 		paths = append(paths, pathFromURL(t, result.FinalURL))
 	}
 	return paths
+}
+
+func sortedPaths(paths []string) []string {
+	sort.Strings(paths)
+	return paths
+}
+
+func containsPath(paths []string, want string) bool {
+	for _, path := range paths {
+		if path == want {
+			return true
+		}
+	}
+	return false
 }
 
 func pathFromURL(t *testing.T, rawURL string) string {

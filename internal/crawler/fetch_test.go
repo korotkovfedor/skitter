@@ -1,7 +1,6 @@
 package crawler
 
 import (
-	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -22,16 +21,9 @@ func TestRunReportsResponseSizeLimit(t *testing.T) {
 		MaxDepth:         0,
 		MaxResponseBytes: 3,
 	})
-	var results []PageResult
-	err := crawler.Run(context.Background(), startURL, func(page PageResult) error {
-		results = append(results, page)
-		return nil
-	})
-	if !errors.Is(err, ErrResponseTooLarge) {
-		t.Fatalf("Run() error = %v, want ErrResponseTooLarge", err)
-	}
+	results := collectResults(t, crawler, startURL)
 	if len(results) != 1 {
-		t.Fatalf("callback count = %d, want 1", len(results))
+		t.Fatalf("result count = %d, want 1", len(results))
 	}
 	if !errors.Is(results[0].Err, ErrResponseTooLarge) {
 		t.Fatalf("PageResult.Err = %v, want ErrResponseTooLarge", results[0].Err)
@@ -63,16 +55,9 @@ func TestRunAcceptsAll2xxResponses(t *testing.T) {
 			defer server.Close()
 
 			crawler, startURL := newTestCrawler(t, server, Settings{MaxDepth: 0})
-			var results []PageResult
-			err := crawler.Run(context.Background(), startURL, func(page PageResult) error {
-				results = append(results, page)
-				return nil
-			})
-			if err != nil {
-				t.Fatalf("Run() error = %v", err)
-			}
+			results := collectResults(t, crawler, startURL)
 			if len(results) != 1 || results[0].Err != nil {
-				t.Fatalf("callback results = %+v, want one successful result", results)
+				t.Fatalf("results = %+v, want one successful result", results)
 			}
 			if results[0].StatusCode != status.code {
 				t.Fatalf("PageResult.StatusCode = %d, want %d", results[0].StatusCode, status.code)
@@ -97,19 +82,12 @@ func TestRunRetriesTemporaryResponse(t *testing.T) {
 		MaxRetries:   1,
 		RetryLatency: 0,
 	})
-	var results []PageResult
-	err := crawler.Run(context.Background(), startURL, func(page PageResult) error {
-		results = append(results, page)
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
+	results := collectResults(t, crawler, startURL)
 	if attempts.Load() != 2 {
 		t.Fatalf("request attempts = %d, want 2", attempts.Load())
 	}
 	if len(results) != 1 || results[0].StatusCode != http.StatusOK || results[0].HTML != "recovered" {
-		t.Fatalf("callback results = %+v, want recovered 200 response", results)
+		t.Fatalf("results = %+v, want recovered 200 response", results)
 	}
 }
 
@@ -126,19 +104,12 @@ func TestRunKeepsFinalTemporaryResponse(t *testing.T) {
 		MaxRetries:   2,
 		RetryLatency: 0,
 	})
-	var results []PageResult
-	err := crawler.Run(context.Background(), startURL, func(page PageResult) error {
-		results = append(results, page)
-		return nil
-	})
-	if err == nil {
-		t.Fatal("Run() error = nil, want final 503 error")
-	}
+	results := collectResults(t, crawler, startURL)
 	if attempts.Load() != 3 {
 		t.Fatalf("request attempts = %d, want 3", attempts.Load())
 	}
 	if len(results) != 1 || results[0].StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("callback results = %+v, want final 503 response", results)
+		t.Fatalf("results = %+v, want final 503 response", results)
 	}
 	if _, ok := errors.AsType[*HTTPError](results[0].Err); !ok {
 		t.Fatalf("PageResult.Err = %T, want *HTTPError", results[0].Err)
