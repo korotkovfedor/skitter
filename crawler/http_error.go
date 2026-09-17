@@ -3,7 +3,9 @@ package crawler
 import "fmt"
 
 // HTTPError describes a fetch failure with a known HTTP response status.
-// Use errors.As to retrieve it through wrapped errors.
+// It can describe a non-2xx status, a rejected redirect with a response, or a
+// failure to read a 2xx body. It does not mean the status itself was unsuccessful.
+// Use errors.As on [PageResult.Err] to retrieve it through [CrawlError].
 type HTTPError struct {
 	// StatusCode is the response status. It may be 200 if reading the body failed.
 	StatusCode int
@@ -12,6 +14,7 @@ type HTTPError struct {
 	Err error
 }
 
+// Error returns the status and, when present, the underlying error message.
 func (e *HTTPError) Error() string {
 	if e.Err != nil {
 		return fmt.Sprintf("HTTP status %d: %v", e.StatusCode, e.Err)

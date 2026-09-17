@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/korotkovfedor/skitter/internal/crawler"
+	"github.com/korotkovfedor/skitter/crawler"
 )
 
 func main() {

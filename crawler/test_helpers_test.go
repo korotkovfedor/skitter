@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -84,12 +85,7 @@ func sortedPaths(paths []string) []string {
 }
 
 func containsPath(paths []string, want string) bool {
-	for _, path := range paths {
-		if path == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(paths, want)
 }
 
 func pathFromURL(t *testing.T, rawURL string) string {

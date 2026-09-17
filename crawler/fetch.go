@@ -11,12 +11,10 @@ import (
 	"time"
 )
 
-var (
-	errAlreadyProcessed = errors.New("redirect target already processed")
-
-	// ErrResponseTooLarge reports that a response body exceeds MaxResponseBytes.
-	ErrResponseTooLarge = errors.New("response body exceeds configured size limit")
-)
+// ErrResponseTooLarge reports that a response body exceeds MaxResponseBytes.
+// Use errors.Is on [PageResult.Err] to detect it through [CrawlError] and
+// [HTTPError]. The result retains the HTTP status but has no Page or partial body.
+var ErrResponseTooLarge = errors.New("response body exceeds configured size limit")
 
 type fetchedPage struct {
 	body       string
@@ -42,7 +40,7 @@ func (c *Crawler) fetch(ctx context.Context, targetURL string) (fetchedPage, err
 		return nil
 	}
 
-	req.Header.Set("User-Agent", "SkitterBot/0.1 korotkoffst@gmail.com")
+	req.Header.Set("User-Agent", "SkitterBot/0.1")
 	resp, err := doWithRetry(ctx, &client, req, c.settings.MaxRetries, c.settings.RetryLatency)
 	if err != nil {
 		// A rejected redirect can return both an error and a response.
